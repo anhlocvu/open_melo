@@ -5,7 +5,7 @@ OpenMeloAudioProcessor::OpenMeloAudioProcessor()
     : AudioProcessor(BusesProperties().withInput("Input", juce::AudioChannelSet::stereo(), true)
                                       .withOutput("Output", juce::AudioChannelSet::stereo(), true))
 {
-    noteManager.onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
+    fallbackNoteManager.onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
     {
         auditionVoice.startPlayback(buf);
     };
@@ -37,6 +37,9 @@ bool OpenMeloAudioProcessor::isMidiEffect() const
 
 double OpenMeloAudioProcessor::getTailLengthSeconds() const
 {
+    double tail = 0.0;
+    if (getTailLengthSecondsForARA(tail))
+        return tail;
     return 0.0;
 }
 
@@ -63,15 +66,21 @@ void OpenMeloAudioProcessor::changeProgramName(int /*index*/, const juce::String
 {
 }
 
-void OpenMeloAudioProcessor::prepareToPlay(double sampleRate, int /*samplesPerBlock*/)
+void OpenMeloAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     auditionVoice.setSampleRate(sampleRate);
-    noteManager.setSampleRate(sampleRate);
+    fallbackNoteManager.setSampleRate(sampleRate);
+
+    if (documentController != nullptr)
+        documentController->getNoteManager().setSampleRate(sampleRate);
+
+    prepareToPlayForARA(sampleRate, samplesPerBlock, getMainBusNumOutputChannels(), getProcessingPrecision());
 }
 
 void OpenMeloAudioProcessor::releaseResources()
 {
     auditionVoice.stopPlayback();
+    releaseResourcesForARA();
 }
 
 bool OpenMeloAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -86,7 +95,48 @@ bool OpenMeloAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) 
     return true;
 }
 
-void OpenMeloAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& /*midiMessages*/)
+void OpenMeloAudioProcessor::didBindToARA() noexcept
+{
+    AudioProcessorARAExtension::didBindToARA();
+
+    if (auto* pr = getPlaybackRenderer())
+        documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(pr->getDocumentController());
+    else if (auto* er = getEditorRenderer())
+        documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(er->getDocumentController());
+    else if (auto* ev = getEditorView())
+        documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(ev->getDocumentController());
+
+    if (documentController != nullptr)
+    {
+        documentController->getNoteManager().onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
+        {
+            auditionVoice.startPlayback(buf);
+        };
+    }
+}
+
+NoteManager& OpenMeloAudioProcessor::getNoteManager()
+{
+    if (documentController != nullptr)
+        return documentController->getNoteManager();
+
+    if (auto* pr = getPlaybackRenderer())
+    {
+        documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(pr->getDocumentController());
+        if (documentController != nullptr)
+        {
+            documentController->getNoteManager().onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
+            {
+                auditionVoice.startPlayback(buf);
+            };
+            return documentController->getNoteManager();
+        }
+    }
+
+    return fallbackNoteManager;
+}
+
+void OpenMeloAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
 
@@ -96,7 +146,18 @@ void OpenMeloAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     if (numSamples <= 0 || numChannels <= 0)
         return;
 
-    // Check DAW host playhead position
+    // 1. ARA Mode
+    if (isBoundToARA())
+    {
+        if (!processBlockForARA(buffer, isRealtime(), getPlayHead()))
+            processBlockBypassed(buffer, midiMessages);
+
+        // Mix in user Audition voice for keyboard preview
+        auditionVoice.renderNextBlock(buffer, 0, numSamples);
+        return;
+    }
+
+    // 2. Real-time Fallback Mode for non-ARA hosts
     auto* hostPlayHead = getPlayHead();
     juce::Optional<juce::AudioPlayHead::PositionInfo> posInfo;
     if (hostPlayHead != nullptr)
@@ -115,18 +176,13 @@ void OpenMeloAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
 
     if (isHostPlaying)
     {
-        // 1. Keep a copy of incoming track audio for continuous real-time vocal ingestion
         juce::AudioBuffer<float> incomingTrackCopy;
         incomingTrackCopy.makeCopyOf(buffer);
 
-        // 2. Sample-accurately replace the original vocal on track with tuned/formant-preserved audio (for edited notes)
-        noteManager.renderTrackPlayback(buffer, currentHostSample, numSamples);
-
-        // 3. Continuously ingest and detect vocal notes from incoming audio across the entire timeline
-        noteManager.processIncomingTrackAudio(incomingTrackCopy, currentHostSample, numSamples);
+        fallbackNoteManager.renderTrackPlayback(buffer, currentHostSample, numSamples);
+        fallbackNoteManager.processIncomingTrackAudio(incomingTrackCopy, currentHostSample, numSamples);
     }
 
-    // 4. Mix in user Audition voice (when navigating notes or editing with keyboard)
     auditionVoice.renderNextBlock(buffer, 0, numSamples);
 }
 
@@ -143,32 +199,29 @@ juce::AudioProcessorEditor* OpenMeloAudioProcessor::createEditor()
 void OpenMeloAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     juce::MemoryOutputStream stream(destData, true);
-
-    // Magic identifier and version for Open Melo state chunk
     stream.writeString("OPENMELO");
-    stream.writeInt(2);
-
-    noteManager.serialize(stream);
+    stream.writeInt(3);
+    getNoteManager().serialize(stream);
 }
 
 void OpenMeloAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
-    if (data == nullptr || sizeInBytes < 8)
+    if (data == nullptr || sizeInBytes <= 0)
         return;
 
-    juce::MemoryInputStream stream(data, static_cast<size_t>(sizeInBytes), false);
-
+    juce::MemoryInputStream stream(data, (size_t)sizeInBytes, false);
     juce::String magic = stream.readString();
-    if (magic != "OPENMELO")
-        return;
-
-    int version = stream.readInt();
-    if (version == 1 || version == 2)
+    if (magic == "OPENMELO")
     {
-        noteManager.deserialize(stream);
+        int version = stream.readInt();
+        if (version >= 1)
+        {
+            getNoteManager().deserialize(stream);
+        }
     }
 }
 
+// Juce createPluginFilter
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new OpenMeloAudioProcessor();

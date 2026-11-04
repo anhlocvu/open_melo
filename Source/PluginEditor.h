@@ -4,7 +4,7 @@
 #include "PluginProcessor.h"
 
 class OpenMeloAudioProcessorEditor : public juce::AudioProcessorEditor,
-                                     public juce::FileDragAndDropTarget
+                                     public juce::AudioProcessorEditorARAExtension
 {
 public:
     explicit OpenMeloAudioProcessorEditor(OpenMeloAudioProcessor&);
@@ -16,15 +16,8 @@ public:
     bool keyPressed(const juce::KeyPress& key) override;
     void focusGained(FocusChangeType cause) override;
 
-    // File Drag and Drop for Instant Track Scanning
-    bool isInterestedInFileDrag(const juce::StringArray& files) override;
-    void filesDropped(const juce::StringArray& files, int x, int y) override;
-
 private:
     OpenMeloAudioProcessor& audioProcessor;
-    std::unique_ptr<juce::FileChooser> fileChooser;
-
-    void openAudioFileDialog();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenMeloAudioProcessorEditor)
 };

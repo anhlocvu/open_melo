@@ -1,10 +1,12 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "OpenMeloARA.h"
 #include "NoteManager.h"
 #include "AuditionVoice.h"
 
-class OpenMeloAudioProcessor : public juce::AudioProcessor
+class OpenMeloAudioProcessor : public juce::AudioProcessor,
+                               public juce::AudioProcessorARAExtension
 {
 public:
     OpenMeloAudioProcessor();
@@ -36,12 +38,18 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    NoteManager& getNoteManager() { return noteManager; }
+    NoteManager& getNoteManager();
     AuditionVoice& getAuditionVoice() { return auditionVoice; }
 
+    bool isBoundToARAMode() const { return isBoundToARA(); }
+
+protected:
+    void didBindToARA() noexcept override;
+
 private:
-    NoteManager noteManager;
+    NoteManager fallbackNoteManager;
     AuditionVoice auditionVoice;
+    OpenMeloDocumentController* documentController = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenMeloAudioProcessor)
 };

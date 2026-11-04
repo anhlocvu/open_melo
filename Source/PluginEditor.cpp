@@ -3,7 +3,7 @@
 #include "NvdaBridge.h"
 
 OpenMeloAudioProcessorEditor::OpenMeloAudioProcessorEditor(OpenMeloAudioProcessor& p)
-    : AudioProcessorEditor(&p), audioProcessor(p)
+    : AudioProcessorEditor(&p), AudioProcessorEditorARAExtension(&p), audioProcessor(p)
 {
     setSize(740, 500);
     setWantsKeyboardFocus(true);
@@ -13,7 +13,7 @@ OpenMeloAudioProcessorEditor::OpenMeloAudioProcessorEditor(OpenMeloAudioProcesso
         repaint();
     };
 
-    NvdaBridge::getInstance().speak("Open Melo 0.2 ready. Melodyne-class TD-PSOLA engine active.", false);
+    NvdaBridge::getInstance().speak("Open Melo 0.2 ready. Melodyne-class ARA & TD-PSOLA engine active.", false);
 }
 
 OpenMeloAudioProcessorEditor::~OpenMeloAudioProcessorEditor()
@@ -24,80 +24,23 @@ OpenMeloAudioProcessorEditor::~OpenMeloAudioProcessorEditor()
 void OpenMeloAudioProcessorEditor::focusGained(FocusChangeType /*cause*/)
 {
     const auto* note = audioProcessor.getNoteManager().getSelectedNote();
+    juce::String modeStr = audioProcessor.isBoundToARAMode() ? "ARA synced. " : "Realtime mode. ";
+
     if (note != nullptr)
     {
-        NvdaBridge::getInstance().speak("Open Melo focused. " + juce::String(audioProcessor.getNoteManager().getNumNotes()) +
+        NvdaBridge::getInstance().speak("Open Melo focused. " + modeStr +
+                                        juce::String(audioProcessor.getNoteManager().getNumNotes()) +
                                         " notes on track. Selected: " + note->getSpeechDescription(), false);
     }
     else
     {
-        NvdaBridge::getInstance().speak("Open Melo focused. No notes. Play track in DAW or press Ctrl+O to ingest vocal.", false);
+        NvdaBridge::getInstance().speak("Open Melo focused. " + modeStr + "No notes on track vocal.", false);
     }
-}
-
-bool OpenMeloAudioProcessorEditor::isInterestedInFileDrag(const juce::StringArray& files)
-{
-    for (const auto& f : files)
-    {
-        if (f.endsWithIgnoreCase(".wav") || f.endsWithIgnoreCase(".mp3") ||
-            f.endsWithIgnoreCase(".aif") || f.endsWithIgnoreCase(".aiff") ||
-            f.endsWithIgnoreCase(".flac") || f.endsWithIgnoreCase(".ogg"))
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-void OpenMeloAudioProcessorEditor::filesDropped(const juce::StringArray& files, int /*x*/, int /*y*/)
-{
-    if (files.size() > 0)
-    {
-        juce::File audioFile(files[0]);
-        NvdaBridge::getInstance().speak("Ingesting audio file " + audioFile.getFileName() + "...", true);
-        audioProcessor.getNoteManager().scanAudioFile(audioFile);
-    }
-}
-
-void OpenMeloAudioProcessorEditor::openAudioFileDialog()
-{
-    fileChooser = std::make_unique<juce::FileChooser>(
-        "Select Vocal Audio File to Ingest",
-        juce::File::getSpecialLocation(juce::File::userHomeDirectory),
-        "*.wav;*.mp3;*.aif;*.aiff;*.flac;*.ogg");
-
-    auto chooserFlags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
-
-    fileChooser->launchAsync(chooserFlags, [this](const juce::FileChooser& fc)
-    {
-        auto result = fc.getResult();
-        if (result.existsAsFile())
-        {
-            NvdaBridge::getInstance().speak("Ingesting audio file " + result.getFileName() + "...", true);
-            audioProcessor.getNoteManager().scanAudioFile(result);
-        }
-    });
 }
 
 bool OpenMeloAudioProcessorEditor::keyPressed(const juce::KeyPress& key)
 {
     auto& nm = audioProcessor.getNoteManager();
-
-    // Ctrl + O: Open audio file dialog to ingest instantly
-    if (key.getModifiers().isCtrlDown() && (key.getKeyCode() == 'O' || key.getKeyCode() == 'o'))
-    {
-        openAudioFileDialog();
-        return true;
-    }
-
-    // Ctrl + R: Clear all notes on track to re-scan
-    if (key.getModifiers().isCtrlDown() && (key.getKeyCode() == 'R' || key.getKeyCode() == 'r'))
-    {
-        nm.clearNotes();
-        NvdaBridge::getInstance().speak("Track notes cleared. Ready to ingest.", true);
-        repaint();
-        return true;
-    }
 
     // Left / Right: Navigate notes
     if (key == juce::KeyPress::leftKey)
@@ -170,16 +113,25 @@ void OpenMeloAudioProcessorEditor::paint(juce::Graphics& g)
 
     g.setFont(juce::FontOptions(13.0f, juce::Font::plain));
     g.setColour(juce::Colour(0xffa0a5b5));
-    g.drawText("Tech VST - Melodyne-Class TD-PSOLA Vocal & Pitch Editor", 20, 35, 450, 18, juce::Justification::left);
+    g.drawText("Tech VST - Melodyne-Class ARA & TD-PSOLA Vocal Editor", 20, 35, 450, 18, juce::Justification::left);
+
+    // ARA Status Indicator
+    bool araActive = audioProcessor.isBoundToARAMode();
+    g.setColour(araActive ? juce::Colour(0xff2ecc71) : juce::Colour(0xff95a5a6));
+    g.fillEllipse((float)(getWidth() - 310), 24.0f, 12.0f, 12.0f);
+
+    g.setColour(juce::Colours::white);
+    g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+    g.drawText(araActive ? "ARA: SYNCED" : "ARA: STANDBY", getWidth() - 290, 20, 110, 20, juce::Justification::left);
 
     // NVDA Status Indicator
     bool nvdaActive = NvdaBridge::getInstance().isNvdaRunning();
     g.setColour(nvdaActive ? juce::Colour(0xff2ecc71) : juce::Colour(0xfff39c12));
-    g.fillEllipse((float)(getWidth() - 170), 24.0f, 12.0f, 12.0f);
+    g.fillEllipse((float)(getWidth() - 160), 24.0f, 12.0f, 12.0f);
 
     g.setColour(juce::Colours::white);
     g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-    g.drawText(nvdaActive ? "NVDA ACTIVE" : "NVDA STANDBY", getWidth() - 150, 20, 130, 20, juce::Justification::left);
+    g.drawText(nvdaActive ? "NVDA ACTIVE" : "NVDA STANDBY", getWidth() - 140, 20, 120, 20, juce::Justification::left);
 
     // Main Current Note Display Box
     auto noteBox = juce::Rectangle<int>(20, 80, getWidth() - 40, 115);
@@ -208,9 +160,10 @@ void OpenMeloAudioProcessorEditor::paint(juce::Graphics& g)
         g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
         g.drawText("TD-PSOLA FORMANTS", noteBox.getX() + noteBox.getWidth() - 210, noteBox.getY() + 20, 190, 20, juce::Justification::right);
 
-        // DAW Playback Tag
+        // ARA Sync Tag
         g.setColour(juce::Colour(0xff2980b9));
-        g.drawText("SAMPLE-ACCURATE SYNC", noteBox.getX() + noteBox.getWidth() - 210, noteBox.getY() + 42, 190, 20, juce::Justification::right);
+        g.drawText(araActive ? "ARA TRACK AUTO-SCAN" : "REALTIME PLAYHEAD SYNC",
+                   noteBox.getX() + noteBox.getWidth() - 210, noteBox.getY() + 42, 190, 20, juce::Justification::right);
 
         g.setFont(juce::FontOptions(14.0f, juce::Font::plain));
         g.setColour(juce::Colour(0xffbdc3c7));
@@ -228,8 +181,8 @@ void OpenMeloAudioProcessorEditor::paint(juce::Graphics& g)
 
         g.setFont(juce::FontOptions(13.0f, juce::Font::plain));
         g.setColour(juce::Colour(0xff95a5a6));
-        g.drawText("Option 1: Play vocal track in DAW (continuously ingests entire track as it plays)\n"
-                   "Option 2: Drag & drop audio file here or press Ctrl+O to ingest entire track in 0.2s.",
+        g.drawText("In ARA DAWs (Reaper, Studio One, Cubase...), vocal tracks are auto-scanned immediately upon inserting Open Melo.\n"
+                   "For non-ARA mode, play vocal track in DAW once to continuously ingest notes.",
                    noteBox.getX() + 25, noteBox.getY() + 60, noteBox.getWidth() - 50, 42, juce::Justification::left);
     }
 
@@ -279,7 +232,7 @@ void OpenMeloAudioProcessorEditor::paint(juce::Graphics& g)
     {
         g.setColour(juce::Colour(0xff555d6e));
         g.setFont(juce::FontOptions(13.0f, juce::Font::italic));
-        g.drawText("Track is empty. Play vocal track in DAW or press Ctrl+O to ingest...", stripBox, juce::Justification::centred);
+        g.drawText("Track is empty. Insert Open Melo on track with vocal audio to auto-scan.", stripBox, juce::Justification::centred);
     }
 
     // Keyboard Shortcuts Guide Box
@@ -297,14 +250,12 @@ void OpenMeloAudioProcessorEditor::paint(juce::Graphics& g)
     juce::String col1 = "• Left / Right: Navigate notes & audition\n"
                         "• Up / Down: Fine-tune CENTS (+/- 1 cent)\n"
                         "• Ctrl + Up / Down: Transpose PITCH (+/- 1 semitone)\n"
-                        "• Ctrl + O: Open audio file to ingest instantly\n"
-                        "• Ctrl + R: Reset / Clear all notes to re-ingest";
+                        "• P: Play / Audition current note";
 
-    juce::String col2 = "• P: Play / Audition current note\n"
-                        "• Shift + P: Snap cents to 0 (Tuned)\n"
+    juce::String col2 = "• Shift + P: Snap cents to 0 (Tuned)\n"
                         "• S: Split note in half (50% cut)\n"
                         "• Shift + S: Slice note into micro segments\n"
-                        "• Space: Trả lại cho DAW điều khiển Play/Stop";
+                        "• Space: DAW global Play/Stop control";
 
     g.drawMultiLineText(col1, guideBox.getX() + 15, guideBox.getY() + 45, 340);
     g.drawMultiLineText(col2, guideBox.getX() + 370, guideBox.getY() + 45, 340);

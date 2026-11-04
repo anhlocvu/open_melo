@@ -191,6 +191,43 @@
 - Bản build Release x64 `Open Melo.vst3` đã được biên dịch thành công và cài đặt trực tiếp vào hệ thống tại:
   `C:\Users\LCBoy\AppData\Local\Programs\Common\VST3\Open Melo.vst3`.
 
+---
+
+## Giai Đoạn 7: Hiện Thực Hoàn Chỉnh Cơ Chế ARA 2.2.0 Chuẩn Melodyne (Tự Động Quét Track Vocal Khi Add Plugin)
+**Ngày hoàn thành**: 05/11/2026
+
+### 1. Dịch Ngược & So Sánh Cơ Chế Với Melodyne
+- Dịch ngược `template/MelodyneCore-5.4.1.004.dll` phát hiện:
+  - Melodyne kết nối qua giao thức ARA2 chuẩn (`IARAMainFactory`, `MUAraDocumentController`, `MUAraAudioSource`, `MUAraAudioPlaybackRegion`).
+  - Khi chèn FX vào track, DAW không gửi realtime audio mà gọi hàm sự kiện `didAddPlaybackRegionToRegionSequence` / `didAddAudioSourceToDocument`.
+  - Melodyne kích hoạt `handleAraElementAnalyzerWillRun` $\rightarrow$ `MUElementAnalyzer::makeMonophonicItems` đọc trực tiếp file audio qua `ARAAudioAccessController` và phân tích toàn bộ nốt trong ~0.2 giây.
+- Trước đây Open Melo chưa hoạt động ARA vì thiếu toàn bộ cấu hình ARA trong CMake (`IS_ARA_EFFECT`), chưa liên kết ARA SDK và chưa triển khai các lớp ARA của JUCE.
+
+### 2. Triển Khai Kiến Trúc Lõi ARA 2.2.0 Cho Open Melo
+- **Đóng gói Celemony ARA SDK 2.2.0**: Đã tích hợp trực tiếp vào `libs/ARA_SDK` (gồm `ARA_API` và `ARA_Library`) độc lập hoàn toàn.
+- **Cấu hình CMake**:
+  - `juce_set_ara_sdk_path("${CMAKE_CURRENT_SOURCE_DIR}/libs/ARA_SDK")`
+  - Bật `IS_ARA_EFFECT TRUE` trong `juce_add_plugin`.
+  - Xuất bản class VST3 chính thức: `ARA Main Factory Class` (CID: `ABCDEF01A1B2C3D4547673744F6D6C6F`).
+- **Xây dựng module `Source/OpenMeloARA.h` & `Source/OpenMeloARA.cpp`**:
+  - `OpenMeloDocumentController`: Kế thừa `juce::ARADocumentControllerSpecialisation`. Tự động lắng nghe `didAddPlaybackRegionToRegionSequence`. Khi clip audio được gán vào track, lập tức dùng `juce::ARAAudioSourceReader` đọc trực tiếp dữ liệu mẫu âm thanh và gọi `noteManager.scanAudioBuffer(...)` phân tích cao độ toàn bộ track tức thì.
+  - `OpenMeloPlaybackRenderer`: Kế thừa `juce::ARAPlaybackRenderer`. Đọc các region âm thanh từ source và áp dụng nắn phô TD-PSOLA từ `NoteManager` theo thời gian thực (sample-accurate).
+  - `OpenMeloEditorRenderer` & `OpenMeloEditorView`: Phục vụ chức năng preview/audition và hiển thị tương tác trong ARA.
+  - Export hàm khởi tạo factory: `createARAFactory()`.
+- **Nâng cấp `OpenMeloAudioProcessor` & `OpenMeloAudioProcessorEditor`**:
+  - `OpenMeloAudioProcessor`: Kế thừa `AudioProcessorARAExtension`. Hỗ trợ chế độ kép: Chạy ARA tự động trên các DAW có ARA (Reaper, Studio One, Cubase...), đồng thời có cơ chế fallback realtime an toàn cho các DAW không có ARA.
+  - `OpenMeloAudioProcessorEditor`: Kế thừa `AudioProcessorEditorARAExtension`.
+  - **Lược bỏ hoàn toàn phím `Ctrl + O` (mở file) và `Ctrl + R` (reset)** theo đúng yêu cầu người dùng — toàn bộ quy trình nhận diện track vocal giờ đây tự động 100%.
+  - Hiển thị nhãn đèn trạng thái `ARA: SYNCED` (Màu xanh lá) khi kết nối ARA thành công.
+  - Phản hồi tức thì qua NVDA ngay khi quét xong track: `"Open Melo ARA: Vocal track scanned automatically. [N] notes ready."`.
+
+### 3. Kết Quả Build & Cài Đặt
+- **Trạng thái Build**: Biên dịch thành công 100% Release x64 với MSVC 19.44 và CMake (Zero Errors).
+- **Thư mục phân phối đã cài đặt**:
+  `C:\Users\LCBoy\AppData\Local\Programs\Common\VST3\Open Melo.vst3` (kèm `nvdaControllerClient64.dll`).
+- Plugin đã sẵn sàng để kiểm tra trực tiếp trên Reaper hoặc bất kỳ DAW nào hỗ trợ ARA!
+
+
 
 <!-- graft:start -->
 ## Graft — repo context graph

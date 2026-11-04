@@ -6,7 +6,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-
 FetchContent_Declare(
     JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
@@ -14,6 +13,8 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(JUCE)
+
+juce_set_ara_sdk_path("${CMAKE_CURRENT_SOURCE_DIR}/libs/ARA_SDK")
 
 juce_add_plugin(OpenMelo
     COMPANY_NAME "Tech VST"
@@ -26,6 +27,7 @@ juce_add_plugin(OpenMelo
     PLUGIN_CODE Omlo
     FORMATS VST3
     PRODUCT_NAME "Open Melo"
+    IS_ARA_EFFECT TRUE
 )
 
 target_sources(OpenMelo
@@ -37,6 +39,8 @@ target_sources(OpenMelo
         Source/AuditionVoice.h
         Source/NoteManager.h
         Source/NoteManager.cpp
+        Source/OpenMeloARA.h
+        Source/OpenMeloARA.cpp
         Source/PluginProcessor.h
         Source/PluginProcessor.cpp
         Source/PluginEditor.h
@@ -51,6 +55,8 @@ target_include_directories(OpenMelo
 
 target_compile_definitions(OpenMelo
     PUBLIC
+        NOMINMAX=1
+        WIN32_LEAN_AND_MEAN=1
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
