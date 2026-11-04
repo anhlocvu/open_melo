@@ -12,3 +12,6 @@ _deps
 CMakeUserPresets.json
 /build
 /template
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
