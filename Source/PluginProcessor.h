@@ -39,7 +39,7 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     NoteManager& getNoteManager();
-    AuditionVoice& getAuditionVoice();
+    AuditionVoice& getAuditionVoice() { return auditionVoice; }
 
     bool isBoundToARAMode() const { return isBoundToARA(); }
 
@@ -48,7 +48,7 @@ protected:
 
 private:
     NoteManager fallbackNoteManager;
-    AuditionVoice fallbackAuditionVoice;
+    AuditionVoice auditionVoice;
     OpenMeloDocumentController* documentController = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenMeloAudioProcessor)

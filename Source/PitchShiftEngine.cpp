@@ -15,241 +15,157 @@ void PitchShiftEngine::setSampleRate(double newSampleRate)
     sampleRate = (newSampleRate > 0.0) ? newSampleRate : 44100.0;
 }
 
-bool PitchShiftEngine::isUnvoicedSegment(const float* data, int numSamples)
+std::vector<int> PitchShiftEngine::detectPitchMarks(const float* data, int numSamples, int periodSamples)
 {
-    if (numSamples < 128)
-        return false;
+    std::vector<int> marks;
+    if (numSamples <= 0 || periodSamples <= 2)
+        return marks;
 
-    int zeroCrossings = 0;
-    float energy = 0.0f;
+    // 1. Find the first local maximum within the first period
+    int searchLen = juce::jmin(numSamples, periodSamples * 2);
+    int bestIdx = 0;
+    float bestVal = -1e9f;
 
-    for (int i = 0; i < numSamples - 1; ++i)
+    for (int i = 0; i < searchLen; ++i)
     {
-        energy += data[i] * data[i];
-        if ((data[i] >= 0.0f && data[i + 1] < 0.0f) || (data[i] < 0.0f && data[i + 1] >= 0.0f))
-            zeroCrossings++;
+        if (data[i] > bestVal)
+        {
+            bestVal = data[i];
+            bestIdx = i;
+        }
     }
 
-    float zcr = (float)zeroCrossings / (float)(numSamples - 1);
-    float rms = std::sqrt(energy / (float)numSamples);
+    marks.push_back(bestIdx);
 
-    // High zero-crossing rate with moderate/low energy = sibilant / unvoiced fricative ('s', 'sh', 't', breath)
-    return (zcr > 0.30f && rms < 0.20f);
+    // 2. Iteratively search for the next glottal pulse peak in the range [curr + 0.8 * T0, curr + 1.2 * T0]
+    int curr = bestIdx;
+    int minStep = juce::jmax(2, (int)(periodSamples * 0.75f));
+    int maxStep = (int)(periodSamples * 1.25f);
+
+    while (curr + minStep < numSamples)
+    {
+        int winStart = curr + minStep;
+        int winEnd = juce::jmin(numSamples - 1, curr + maxStep);
+
+        int peakIdx = winStart;
+        float peakVal = -1e9f;
+
+        for (int i = winStart; i <= winEnd; ++i)
+        {
+            if (data[i] > peakVal)
+            {
+                peakVal = data[i];
+                peakIdx = i;
+            }
+        }
+
+        marks.push_back(peakIdx);
+        curr = peakIdx;
+    }
+
+    return marks;
 }
 
-void PitchShiftEngine::processWsolaPitchShift(const float* inData, int inSamples, float* outData, double pitchRatio)
+void PitchShiftEngine::processTdPsola(const float* inData, int inSamples, float* outData, double pitchRatio, double pitchHz)
 {
     if (inSamples <= 0)
         return;
 
-    // Bit-transparent bypass if no transposition
-    if (std::abs(pitchRatio - 1.0) < 0.0005)
+    // If no shift, bit-transparent bypass
+    if (std::abs(pitchRatio - 1.0) < 0.001)
     {
         std::copy(inData, inData + inSamples, outData);
         return;
     }
 
-    // 1. Resample inData by factor alpha = pitchRatio (Cubic Hermite Interpolation)
-    int resampledLen = juce::jmax(1, (int)std::round((double)inSamples / pitchRatio));
-    std::vector<float> resampled((size_t)resampledLen);
+    // Calculate fundamental period T0 in samples
+    double safePitchHz = juce::jlimit(50.0, 1500.0, pitchHz);
+    int periodSamples = juce::jlimit(16, 1024, (int)std::round(sampleRate / safePitchHz));
 
-    for (int i = 0; i < resampledLen; ++i)
+    // Pitch marks for glottal pulse epochs
+    std::vector<int> marks = detectPitchMarks(inData, inSamples, periodSamples);
+
+    if (marks.size() < 2)
     {
-        double pos = (double)i * pitchRatio;
-        int idx = (int)pos;
-        float frac = (float)(pos - (double)idx);
-
-        float y0 = (idx > 0) ? inData[idx - 1] : inData[0];
-        float y1 = (idx < inSamples) ? inData[idx] : 0.0f;
-        float y2 = (idx + 1 < inSamples) ? inData[idx + 1] : y1;
-        float y3 = (idx + 2 < inSamples) ? inData[idx + 2] : y2;
-
-        float c0 = y1;
-        float c1 = 0.5f * (y2 - y0);
-        float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
-        float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
-
-        resampled[(size_t)i] = ((c3 * frac + c2) * frac + c1) * frac + c0;
+        // Fallback: regular spacing if no distinct marks found
+        marks.clear();
+        for (int p = 0; p < inSamples; p += periodSamples)
+            marks.push_back(p);
     }
 
-    // 2. WSOLA time stretch from resampledLen back to inSamples (Preserving 100% exact note length & tempo)
-    int winLen = juce::jlimit(512, 2048, (int)(sampleRate * 0.032));
-    if (winLen % 2 != 0)
-        winLen++;
+    // Synthesis period
+    double targetPeriod = (double)periodSamples / pitchRatio;
+    targetPeriod = juce::jlimit(8.0, 2048.0, targetPeriod);
 
-    int hopS = winLen / 4; // 75% overlap for ultra-smooth crossfade
-    double hopA = (double)hopS * ((double)resampledLen / (double)inSamples);
-    int maxDelta = hopS / 2;
+    std::vector<float> accum(inSamples, 0.0f);
+    std::vector<float> norm(inSamples, 0.0f);
 
-    std::vector<float> hann((size_t)winLen);
+    // Synthesis time pointer
+    double synthTime = (double)marks[0];
+    int halfWin = periodSamples;
+    int winLen = halfWin * 2;
+
+    // Precompute Hann window of length 2 * T0
+    std::vector<float> window(winLen);
     for (int i = 0; i < winLen; ++i)
     {
-        hann[(size_t)i] = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * (float)i / (float)(winLen - 1)));
+        window[i] = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * (float)i / (float)(winLen - 1)));
     }
 
-    std::vector<float> accum((size_t)inSamples, 0.0f);
-    std::vector<float> norm((size_t)inSamples, 0.0f);
-
-    int synPos = 0;
-    double anPos = 0.0;
-
-    while (synPos + winLen <= inSamples && (int)anPos + winLen <= resampledLen)
+    while (synthTime < (double)inSamples)
     {
-        int nomAn = (int)anPos;
-        int bestAn = nomAn;
+        int synthCenter = (int)std::round(synthTime);
 
-        if (synPos > 0)
+        // Find closest analysis mark to the current synthesis time
+        int closestMark = marks[0];
+        int minDiff = std::abs(marks[0] - synthCenter);
+
+        for (size_t i = 1; i < marks.size(); ++i)
         {
-            float bestCorr = -1e9f;
-            int deltaMin = juce::jmax(0, nomAn - maxDelta);
-            int deltaMax = juce::jmin(resampledLen - winLen, nomAn + maxDelta);
-
-            for (int cand = deltaMin; cand <= deltaMax; ++cand)
+            int diff = std::abs(marks[i] - synthCenter);
+            if (diff < minDiff)
             {
-                float corr = 0.0f;
-                for (int j = 0; j < winLen; j += 4)
-                {
-                    corr += resampled[(size_t)(cand + j)] * accum[(size_t)(synPos + j)];
-                }
-                if (corr > bestCorr)
-                {
-                    bestCorr = corr;
-                    bestAn = cand;
-                }
+                minDiff = diff;
+                closestMark = marks[i];
+            }
+            else if (diff > minDiff)
+            {
+                // Marks are monotonically increasing
+                break;
             }
         }
 
-        // Overlap-add windowed grain
-        for (int j = 0; j < winLen; ++j)
+        // Overlap-add windowed period from analysis point into synthesis position
+        for (int i = 0; i < winLen; ++i)
         {
-            float w = hann[(size_t)j];
-            accum[(size_t)(synPos + j)] += resampled[(size_t)(bestAn + j)] * w;
-            norm[(size_t)(synPos + j)] += w;
+            int inIdx = closestMark - halfWin + i;
+            int outIdx = synthCenter - halfWin + i;
+
+            if (outIdx >= 0 && outIdx < inSamples)
+            {
+                float sampleVal = 0.0f;
+                if (inIdx >= 0 && inIdx < inSamples)
+                    sampleVal = inData[inIdx];
+
+                float w = window[i];
+                accum[outIdx] += sampleVal * w;
+                norm[outIdx] += w;
+            }
         }
 
-        synPos += hopS;
-        anPos += hopA;
+        synthTime += targetPeriod;
     }
 
-    // 3. Normalization (Smooth without clicks or divide-by-zero)
+    // Normalize output and crossfade smoothly
     for (int i = 0; i < inSamples; ++i)
     {
-        if (norm[(size_t)i] > 1e-4f)
+        if (norm[i] > 0.02f)
         {
-            outData[i] = accum[(size_t)i] / norm[(size_t)i];
+            outData[i] = accum[i] / norm[i];
         }
         else
         {
             outData[i] = inData[i];
-        }
-    }
-}
-
-void PitchShiftEngine::applyFormantPreservation(const float* origData, float* shiftedData, int inSamples, double pitchRatio)
-{
-    if (inSamples <= 512 || std::abs(pitchRatio - 1.0) < 0.02)
-        return;
-
-    const int fftOrder = 11;
-    const int fftSize = 1 << fftOrder; // 2048 points
-    const int hopSize = fftSize / 2;    // 50% overlap
-
-    juce::dsp::FFT fft(fftOrder);
-
-    std::vector<float> hann((size_t)fftSize);
-    for (int i = 0; i < fftSize; ++i)
-    {
-        hann[(size_t)i] = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * (float)i / (float)(fftSize - 1)));
-    }
-
-    std::vector<float> origFftBuffer((size_t)(fftSize * 2), 0.0f);
-    std::vector<float> shiftFftBuffer((size_t)(fftSize * 2), 0.0f);
-
-    std::vector<float> origMag((size_t)(fftSize / 2 + 1));
-    std::vector<float> shiftMag((size_t)(fftSize / 2 + 1));
-    std::vector<float> origEnv((size_t)(fftSize / 2 + 1));
-    std::vector<float> shiftEnv((size_t)(fftSize / 2 + 1));
-
-    std::vector<float> outputAccum((size_t)inSamples, 0.0f);
-    std::vector<float> outputNorm((size_t)inSamples, 0.0f);
-
-    const int filterRadius = 14; // Smoothing filter width (~300 Hz)
-
-    for (int pos = 0; pos + fftSize <= inSamples; pos += hopSize)
-    {
-        // Window input frames
-        std::fill(origFftBuffer.begin(), origFftBuffer.end(), 0.0f);
-        std::fill(shiftFftBuffer.begin(), shiftFftBuffer.end(), 0.0f);
-
-        for (int i = 0; i < fftSize; ++i)
-        {
-            origFftBuffer[(size_t)i] = origData[pos + i] * hann[(size_t)i];
-            shiftFftBuffer[(size_t)i] = shiftedData[pos + i] * hann[(size_t)i];
-        }
-
-        // Forward FFT
-        fft.performRealOnlyForwardTransform(origFftBuffer.data());
-        fft.performRealOnlyForwardTransform(shiftFftBuffer.data());
-
-        // Extract magnitudes
-        for (int k = 0; k <= fftSize / 2; ++k)
-        {
-            float rO = origFftBuffer[(size_t)(2 * k)];
-            float iO = origFftBuffer[(size_t)(2 * k + 1)];
-            origMag[(size_t)k] = std::sqrt(rO * rO + iO * iO);
-
-            float rS = shiftFftBuffer[(size_t)(2 * k)];
-            float iS = shiftFftBuffer[(size_t)(2 * k + 1)];
-            shiftMag[(size_t)k] = std::sqrt(rS * rS + iS * iS);
-        }
-
-        // Smooth spectral envelopes (moving average)
-        for (int k = 0; k <= fftSize / 2; ++k)
-        {
-            float sumO = 0.0f, sumS = 0.0f;
-            int count = 0;
-            int kMin = juce::jmax(0, k - filterRadius);
-            int kMax = juce::jmin(fftSize / 2, k + filterRadius);
-
-            for (int j = kMin; j <= kMax; ++j)
-            {
-                sumO += origMag[(size_t)j];
-                sumS += shiftMag[(size_t)j];
-                count++;
-            }
-
-            origEnv[(size_t)k] = sumO / (float)count;
-            shiftEnv[(size_t)k] = sumS / (float)count;
-        }
-
-        // Formant compensation gain
-        for (int k = 0; k <= fftSize / 2; ++k)
-        {
-            float gain = (origEnv[(size_t)k] + 1e-3f) / (shiftEnv[(size_t)k] + 1e-3f);
-            gain = juce::jlimit(0.35f, 2.8f, gain);
-
-            shiftFftBuffer[(size_t)(2 * k)] *= gain;
-            shiftFftBuffer[(size_t)(2 * k + 1)] *= gain;
-        }
-
-        // Inverse FFT
-        fft.performRealOnlyInverseTransform(shiftFftBuffer.data());
-
-        // Overlap-add back into accumulator
-        for (int i = 0; i < fftSize; ++i)
-        {
-            float w = hann[(size_t)i];
-            outputAccum[(size_t)(pos + i)] += shiftFftBuffer[(size_t)i] * w;
-            outputNorm[(size_t)(pos + i)] += w * w;
-        }
-    }
-
-    // Blend restored formant audio back into shiftedData
-    for (int i = 0; i < inSamples; ++i)
-    {
-        if (outputNorm[(size_t)i] > 1e-4f)
-        {
-            shiftedData[i] = outputAccum[(size_t)i] / outputNorm[(size_t)i];
         }
     }
 }
@@ -259,8 +175,6 @@ void PitchShiftEngine::process(const juce::AudioBuffer<float>& input,
                                double pitchRatio,
                                double originalPitchMidi)
 {
-    juce::ignoreUnused(originalPitchMidi);
-
     int numChannels = input.getNumChannels();
     int inSamples = input.getNumSamples();
 
@@ -273,38 +187,21 @@ void PitchShiftEngine::process(const juce::AudioBuffer<float>& input,
     output.setSize(numChannels, inSamples);
     output.clear();
 
-    if (std::abs(pitchRatio - 1.0) < 0.0005)
+    if (std::abs(pitchRatio - 1.0) < 0.001)
     {
         output.makeCopyOf(input);
         return;
     }
 
+    double pitchHz = 440.0 * std::pow(2.0, (originalPitchMidi - 69.0) / 12.0);
+
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        const float* inPtr = input.getReadPointer(ch);
-        float* outPtr = output.getWritePointer(ch);
-
-        // Melodyne Sibilant Protection: Unvoiced sections (fricatives, breath, 's', 't') bypass pitch shifting
-        if (isUnvoicedSegment(inPtr, inSamples))
-        {
-            std::copy(inPtr, inPtr + inSamples, outPtr);
-            continue;
-        }
-
-        // 1. Artifact-free WSOLA Pitch Shifting
-        processWsolaPitchShift(inPtr, inSamples, outPtr, pitchRatio);
-
-        // 2. Anti-Chipmunk Formant Envelope Preservation
-        applyFormantPreservation(inPtr, outPtr, inSamples, pitchRatio);
-
-        // 3. Smooth 64-sample boundary crossfade to eliminate edge clicks
-        int fadeLen = juce::jmin(64, inSamples / 2);
-        for (int i = 0; i < fadeLen; ++i)
-        {
-            float gain = (float)i / (float)fadeLen;
-            outPtr[i] *= gain;
-            outPtr[inSamples - 1 - i] *= gain;
-        }
+        processTdPsola(input.getReadPointer(ch),
+                       inSamples,
+                       output.getWritePointer(ch),
+                       pitchRatio,
+                       pitchHz);
     }
 }
 

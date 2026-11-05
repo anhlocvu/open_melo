@@ -7,7 +7,7 @@ OpenMeloAudioProcessor::OpenMeloAudioProcessor()
 {
     fallbackNoteManager.onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
     {
-        getAuditionVoice().startPlayback(buf);
+        auditionVoice.startPlayback(buf);
     };
 }
 
@@ -68,20 +68,18 @@ void OpenMeloAudioProcessor::changeProgramName(int /*index*/, const juce::String
 
 void OpenMeloAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
-    getAuditionVoice().setSampleRate(sampleRate);
+    auditionVoice.setSampleRate(sampleRate);
     fallbackNoteManager.setSampleRate(sampleRate);
 
     if (documentController != nullptr)
-    {
-        documentController->setTargetSampleRate(sampleRate);
-    }
+        documentController->getNoteManager().setSampleRate(sampleRate);
 
     prepareToPlayForARA(sampleRate, samplesPerBlock, getMainBusNumOutputChannels(), getProcessingPrecision());
 }
 
 void OpenMeloAudioProcessor::releaseResources()
 {
-    getAuditionVoice().stopPlayback();
+    auditionVoice.stopPlayback();
     releaseResourcesForARA();
 }
 
@@ -112,36 +110,9 @@ void OpenMeloAudioProcessor::didBindToARA() noexcept
     {
         documentController->getNoteManager().onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
         {
-            documentController->getAuditionVoice().startPlayback(buf);
+            auditionVoice.startPlayback(buf);
         };
     }
-}
-
-AuditionVoice& OpenMeloAudioProcessor::getAuditionVoice()
-{
-    if (documentController != nullptr)
-        return documentController->getAuditionVoice();
-
-    if (auto* pr = getPlaybackRenderer())
-    {
-        documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(pr->getDocumentController());
-        if (documentController != nullptr)
-            return documentController->getAuditionVoice();
-    }
-    else if (auto* er = getEditorRenderer())
-    {
-        documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(er->getDocumentController());
-        if (documentController != nullptr)
-            return documentController->getAuditionVoice();
-    }
-    else if (auto* ev = getEditorView())
-    {
-        documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(ev->getDocumentController());
-        if (documentController != nullptr)
-            return documentController->getAuditionVoice();
-    }
-
-    return fallbackAuditionVoice;
 }
 
 NoteManager& OpenMeloAudioProcessor::getNoteManager()
@@ -156,31 +127,7 @@ NoteManager& OpenMeloAudioProcessor::getNoteManager()
         {
             documentController->getNoteManager().onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
             {
-                documentController->getAuditionVoice().startPlayback(buf);
-            };
-            return documentController->getNoteManager();
-        }
-    }
-    else if (auto* er = getEditorRenderer())
-    {
-        documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(er->getDocumentController());
-        if (documentController != nullptr)
-        {
-            documentController->getNoteManager().onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
-            {
-                documentController->getAuditionVoice().startPlayback(buf);
-            };
-            return documentController->getNoteManager();
-        }
-    }
-    else if (auto* ev = getEditorView())
-    {
-        documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(ev->getDocumentController());
-        if (documentController != nullptr)
-        {
-            documentController->getNoteManager().onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
-            {
-                documentController->getAuditionVoice().startPlayback(buf);
+                auditionVoice.startPlayback(buf);
             };
             return documentController->getNoteManager();
         }
@@ -206,7 +153,7 @@ void OpenMeloAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
             processBlockBypassed(buffer, midiMessages);
 
         // Mix in user Audition voice for keyboard preview
-        getAuditionVoice().renderNextBlock(buffer, 0, numSamples);
+        auditionVoice.renderNextBlock(buffer, 0, numSamples);
         return;
     }
 
@@ -236,7 +183,7 @@ void OpenMeloAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         fallbackNoteManager.processIncomingTrackAudio(incomingTrackCopy, currentHostSample, numSamples);
     }
 
-    getAuditionVoice().renderNextBlock(buffer, 0, numSamples);
+    auditionVoice.renderNextBlock(buffer, 0, numSamples);
 }
 
 bool OpenMeloAudioProcessor::hasEditor() const

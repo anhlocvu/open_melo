@@ -229,56 +229,6 @@
 
 
 
----
-
-## Giai Đoạn 8: Khắc Phục Lỗi Quét Lệch Nốt, Khôi Phục Audition Bàn Phím Trong ARA & Nâng Cấp Lõi WSOLA Khử Nổ Tạch Tạch (Đã hoàn thành)
-**Ngày hoàn thành**: 05/11/2026
-
-### 1. Khắc Phục Lỗi Quét Xong Bị Trừ Xuống 1 Cung / Nửa Cung
-- **Nguyên nhân**:
-  1. Thuật toán `detectPitchAutocorr` cũ dùng cực đại toàn cục mà không có cơ chế chọn đỉnh chu kỳ đầu tiên (first prominent peak). Với giọng hát có năng lượng Formant $F_1, F_2$ mạnh, tương quan chéo dễ bị nhảy sang lag lớn hơn, làm giảm tần số tính toán và tụt nốt xuống 1-2 semitones.
-  2. Thiếu nội suy Parabol ở đỉnh lag dẫn đến sai số lượng tử hóa.
-  3. Lệch tỉ lệ mẫu giữa audio source và project timeline sample rate.
-- **Giải pháp**:
-  - Thay thế hoàn toàn bằng **Thuật toán YIN Pitch Estimator**:
-    - Sử dụng hàm chênh lệch trung bình chuẩn hóa tích lũy (CMNDF).
-    - Ngưỡng Dip Threshold $0.15$ chọn chuẩn xác chu kỳ cơ bản đầu tiên, triệt tiêu 100% lỗi nhảy nhầm Formant hay Sub-harmonic.
-    - Áp dụng **Nội suy Parabol (Parabolic Interpolation)** đạt độ chính xác sub-cent ($< 0.01$ cent).
-    - Nâng kích thước cửa sổ phân tích lên 2048 mẫu cho độ phân giải tần số trầm cực tốt.
-  - Chuẩn hóa đồng bộ Sample Rate giữa Audio Source và DAW Timeline.
-  - **Kết quả**: Cao độ nốt sau khi quét giữ nguyên vẹn 100% đúng chuẩn như vocal gốc, không còn bị trừ nửa cung hay 1 cung!
-
-### 2. Khôi Phục Hoàn Toàn Tính Năng Nghe Thử Nốt (Audition) Bằng Bàn Phím Trong ARA
-- **Nguyên nhân**: Trong DAW (Reaper), khi transport dừng (STOP), DAW không chạy `AudioProcessor::processBlock` mà chỉ gọi `ARAEditorRenderer::processBlock`. Trước đây `OpenMeloEditorRenderer` là class rỗng và `AuditionVoice` chỉ được mix trong processor.
-- **Giải pháp**:
-  - Đưa `AuditionVoice` làm tài nguyên tập trung trong `OpenMeloDocumentController`.
-  - Triển khai đầy đủ `OpenMeloEditorRenderer`: Override `prepareToPlay`, `reset` và `processBlock` để mix trực tiếp `AuditionVoice` ra buffer âm thanh khi DAW dừng phát.
-  - Đồng thời mix `AuditionVoice` trong `OpenMeloPlaybackRenderer::processBlock` và `OpenMeloAudioProcessor::processBlock`.
-  - **Kết quả**: Khi bấm `P`, `Left/Right`, `Up/Down`, `Ctrl+Up/Down`, `Shift+P`, âm thanh nốt được phát ngay lập tức ra loa với độ trễ gần như zero, hoạt động mượt mà cả khi DAW đang dừng hay đang phát!
-
-### 3. Nâng Cấp Lõi Pitch Shifting WSOLA: Khử Tiếng Nổ Tạch Tạch, Giữ Nguyên Tốc Độ & Bảo Toàn Formant Tự Nhiên
-- **Nguyên nhân tiếng nổ tạch tạch**: Bộ TD-PSOLA cũ dùng điều kiện cắt ngưỡng `norm[i] > 0.02f` tạo bước nhảy gián đoạn (step discontinuity) sinh ra xung nhọn (clicks/pops).
-- **Giải pháp**:
-  - Thay thế bằng **WSOLA (Waveform Similarity Overlap-Add)**:
-    - Nội suy Cubic Hermite resampler theo tỉ lệ cao độ $\alpha$.
-    - Kéo dãn thời gian bằng WSOLA với cửa sổ Hann gối nhau $75\%$ (hop size $W/4$). Chuẩn hóa tổng trọng số luôn dương và mượt mà, triệt tiêu 100% tiếng nổ "tạch tạch".
-    - Tự động so khớp pha bằng tương quan chéo (Cross-correlation phase alignment).
-    - Giữ nguyên 100% thời lượng mẫu và tốc độ tempo của nốt.
-  - **Cơ chế tách âm xát (Melodyne-style Sibilant Protection)**:
-    - Tự động nhận diện phụ âm vô thanh / âm xát (như *s, x, ch, t, ph*, tiếng lấy hơi) qua tỷ lệ Zero Crossing Rate (ZCR).
-    - Giữ nguyên dạng sóng gốc cho các âm vô thanh, không làm méo hay sinh tiếng kim loại.
-  - **Bảo toàn Formant quang phổ (Anti-Chipmunk Spectral Envelope Preservation)**:
-    - Sử dụng 2048-point FFT trích xuất đường bao Formant $E(k)$ qua bộ lọc làm mịn phổ 300 Hz.
-    - Bù trừ đường bao Formant gốc lên tín hiệu đã nắn pitch.
-    - Kéo nốt lên cao 2-4 semitones giọng hát vẫn giữ được độ dày, độ ấm tự nhiên, hoàn toàn không bị biến thành giọng sóc chuột!
-
-### 4. Kết Quả Build & Phân Phối
-- Biên dịch thành công 100% Release x64 với MSVC 19.44 và JUCE 8.0.4.
-- Đã tự động cài đặt vào:
-  `C:\Users\LCBoy\AppData\Local\Programs\Common\VST3\Open Melo.vst3` (kèm `nvdaControllerClient64.dll`).
-
----
-
 <!-- graft:start -->
 ## Graft — repo context graph
 

@@ -2,7 +2,6 @@
 
 #include <juce_core/juce_core.h>
 #include <juce_audio_basics/juce_audio_basics.h>
-#include <juce_dsp/juce_dsp.h>
 #include <vector>
 
 class PitchShiftEngine
@@ -13,8 +12,8 @@ public:
 
     void setSampleRate(double newSampleRate);
 
-    // Shifts pitch using WSOLA (Waveform Similarity Overlap-Add) with Spectral Formant Preservation
-    // Preserves 100% natural vocal tract formants (F1, F2, F3), zero clicks, and exact timing/speed
+    // Shifts pitch using Time-Domain Pitch Synchronous Overlap-Add (TD-PSOLA)
+    // Preserves 100% natural vocal tract formants (F1, F2, F3) and original singer timbre
     void process(const juce::AudioBuffer<float>& input,
                  juce::AudioBuffer<float>& output,
                  double pitchRatio,
@@ -29,7 +28,6 @@ public:
 private:
     double sampleRate = 44100.0;
 
-    void processWsolaPitchShift(const float* inData, int inSamples, float* outData, double pitchRatio);
-    void applyFormantPreservation(const float* origData, float* shiftedData, int inSamples, double pitchRatio);
-    bool isUnvoicedSegment(const float* data, int numSamples);
+    void processTdPsola(const float* inData, int inSamples, float* outData, double pitchRatio, double pitchHz);
+    std::vector<int> detectPitchMarks(const float* data, int numSamples, int periodSamples);
 };
