@@ -174,7 +174,7 @@ void NoteManager::processIncomingTrackAudio(const juce::AudioBuffer<float>& buff
     liveTrackAccumulatorLeft.insert(liveTrackAccumulatorLeft.end(), inL, inL + numSamples);
     liveTrackAccumulatorRight.insert(liveTrackAccumulatorRight.end(), inR, inR + numSamples);
 
-    int windowSize = 1024;
+    int windowSize = 2048;
     int hopSize = 512;
 
     while ((int)liveTrackAccumulatorLeft.size() >= windowSize)
@@ -193,7 +193,7 @@ void NoteManager::processIncomingTrackAudio(const juce::AudioBuffer<float>& buff
         double pitchMidi = 0.0;
         if (rms > 0.008f)
         {
-            pitchMidi = detectPitchAutocorr(winL, windowSize);
+            pitchMidi = PitchDetector::detectPitch(winL, windowSize, sampleRate);
         }
 
         int64_t approxSampleTime = hostPlayheadSample + numSamples - (int64_t)liveTrackAccumulatorLeft.size();
@@ -307,7 +307,7 @@ bool NoteManager::scanAudioBuffer(const juce::AudioBuffer<float>& buffer, double
     const float* channelDataL = buffer.getReadPointer(0);
     const float* channelDataR = (buffer.getNumChannels() > 1) ? buffer.getReadPointer(1) : channelDataL;
 
-    int windowSize = 1024;
+    int windowSize = 2048;
     int hopSize = 512;
     int pos = 0;
 
@@ -334,7 +334,7 @@ bool NoteManager::scanAudioBuffer(const juce::AudioBuffer<float>& buffer, double
         double pitchMidi = 0.0;
         if (rms > 0.008f)
         {
-            pitchMidi = detectPitchAutocorr(winPtrL, windowSize);
+            pitchMidi = PitchDetector::detectPitch(winPtrL, windowSize, sampleRate);
         }
 
         if (pitchMidi > 0.0)
@@ -692,52 +692,6 @@ int NoteManager::sliceCurrentNoteIntoPieces(int targetSegmentMs)
         onNotesChanged();
 
     return count;
-}
-
-double NoteManager::detectPitchAutocorr(const float* buffer, int length)
-{
-    if (length <= 256)
-        return 0.0;
-
-    int minLag = (int)(sampleRate / 1000.0); // 1000 Hz
-    int maxLag = (int)(sampleRate / 60.0);   // 60 Hz
-    maxLag = juce::jmin(maxLag, length / 2);
-
-    float maxCorr = 0.0f;
-    int bestLag = -1;
-
-    float r0 = 0.0f;
-    for (int i = 0; i < length - maxLag; ++i)
-    {
-        r0 += buffer[i] * buffer[i];
-    }
-
-    if (r0 < 1e-4f)
-        return 0.0;
-
-    for (int lag = minLag; lag <= maxLag; ++lag)
-    {
-        float corr = 0.0f;
-        for (int i = 0; i < length - maxLag; ++i)
-        {
-            corr += buffer[i] * buffer[i + lag];
-        }
-
-        if (corr > maxCorr)
-        {
-            maxCorr = corr;
-            bestLag = lag;
-        }
-    }
-
-    if (bestLag > 0 && (maxCorr / r0) > 0.45f)
-    {
-        double freq = sampleRate / (double)bestLag;
-        double midi = 69.0 + 12.0 * std::log2(freq / 440.0);
-        return midi;
-    }
-
-    return 0.0;
 }
 
 void NoteManager::renderAndAuditionNote(OpenMeloNote& note)

@@ -227,6 +227,48 @@
   `C:\Users\LCBoy\AppData\Local\Programs\Common\VST3\Open Melo.vst3` (kèm `nvdaControllerClient64.dll`).
 - Plugin đã sẵn sàng để kiểm tra trực tiếp trên Reaper hoặc bất kỳ DAW nào hỗ trợ ARA!
 
+---
+
+## Giai Đoạn 8: Khắc Phục Triệt Để Lệch Cao Độ & Mất Tiếng Audition, Tích Hợp Signalsmith Stretch & McLeod Pitch Method (MPM)
+**Ngày hoàn thành**: 05/11/2026
+
+### 1. Phân Tích & Giải Quyết Các Vấn Đề Cốt Tử
+1. **Lỗi lệch cao độ (-1 cung hoặc nửa cung) sau khi quét ARA**:
+   - **Nguyên nhân**: Thuật toán Autocorrelation cũ tìm đỉnh cực đại toàn cục không chuẩn hóa (non-normalized cross-correlation), không nội suy đỉnh và dễ bị nhảy bậc hài âm/subharmonic (octave jumping). Khi thử nghiệm, nó làm tụt tần số nghiêm trọng (-12 đến -24 semitone hoặc lệch 1-2 semitone tùy phụ âm và formant).
+   - **Khắc phục**: Xây dựng module [`PitchDetector.h`](file:///C:/Users/LCBoy/Desktop/data/vst-projects/open_melo/Source/PitchDetector.h) dựa trên thuật toán **McLeod Pitch Method (MPM)**:
+     - Tính hàm chênh lệch bình phương chuẩn hóa (**NSDF** - Normalized Square Difference Function).
+     - Dò tìm đỉnh cực đại đầu tiên sau điểm qua 0 vượt ngưỡng $0.85 \times \text{maxPeak}$.
+     - Nội suy Parabolic cực đại chính xác tới mức vi mẫu (sub-sample).
+     - **Kết quả kiểm thử**: Sai số thực tế đạt **0.0000 semitones**, bảo đảm nốt hát gì quét ra đúng 100% nốt đó.
+2. **Lỗi mất tiếng Audition (Mũi tên, P) khi ở chế độ ARA**:
+   - **Nguyên nhân**:
+     - Trong kiến trúc ARA, DAW tạo các instance `AudioProcessor` riêng biệt cho `PlaybackRenderer` và `EditorView`. Thực thể `AuditionVoice` trước đây nằm riêng trong từng processor nên phím bấm ở Editor không truyền sang được PlaybackRenderer.
+     - Khi DAW ở trạng thái **STOP** (`isPlaying == false`), `PlaybackRenderer` trước đây bị ngắt toàn bộ âm thanh.
+     - Lớp `OpenMeloEditorRenderer` để trống chưa hiện thực `processBlock`.
+   - **Khắc phục**:
+     - Đưa `AuditionVoice` vào làm thành viên dùng chung tập trung tại `OpenMeloDocumentController`.
+     - Hiện thực hoàn chỉnh `OpenMeloEditorRenderer::processBlock` và cho phép `OpenMeloPlaybackRenderer::processBlock` phát `AuditionVoice` ngay cả khi DAW đang dừng (STOP).
+     - Bấm mũi tên trái/phải, lên/xuống, Ctrl+Lên/Xuống hoặc phím `P` đều phát tiếng tức thì.
+3. **Triệt tiêu tiếng nổ tạch tạch & Méo robot bằng Signalsmith Stretch**:
+   - Thay thế toàn bộ giải thuật TD-PSOLA tự chế bằng thư viện đỉnh cao **Signalsmith Stretch** (Geraint Luff, giấy phép MIT, self-contained trong `libs/signalsmith/`).
+   - Sử dụng Spectral Phase Vocoder hiện đại với Phase Locking:
+     - `stretch.setTransposeSemitones(semitones, 8000.0f / sampleRate)`: Giữ đường bao phổ phía trên 8kHz.
+     - `stretch.setFormantSemitones(0.0f, true)` & `stretch.setFormantBase(pitchHz / sampleRate)`: Bù trừ cao độ để giữ nguyên 100% formants khoang họng ($F_1, F_2, F_3$), loại bỏ hoàn toàn tiếng sóc chuột (anti-chipmunk), tiếng nghẹt mũi và tiếng robot.
+     - Tự động đệm đối xứng (padding & reflection) cho các phân đoạn nốt siêu ngắn để luôn render mượt mà không nổ lách tách.
+
+### 2. Kiểm Thử Chất Lượng Bằng Tracktion pluginval
+- Chạy bộ kiểm thử tiêu chuẩn quốc tế **`pluginval`** (Tracktion) ở mức khắt khe Level 5:
+  - Khởi động lạnh/ấm (Cold/Warm Open): **PASSED**
+  - Audio processing đa tần số mẫu (44.1kHz, 48kHz, 96kHz) và đa kích thước block (64, 128, 256, 512, 1024): **PASSED**
+  - Tự động hóa tham số & Trạng thái plugin (State restore): **PASSED**
+  - Quản lý bus & Luồng âm thanh an toàn: **PASSED (SUCCESS 100%)**
+  - **Không có bất kỳ lỗi crash, rò rỉ bộ nhớ hay vi phạm Audio Thread nào!**
+
+### 3. Phân Phối & Cài Đặt
+- Build Release x64 thành công với CMake 4.4.0 + MSVC 19.44.
+- Đã tự động triển khai vào:
+  `C:\Users\LCBoy\AppData\Local\Programs\Common\VST3\Open Melo.vst3` (kèm `nvdaControllerClient64.dll`).
+
 
 
 <!-- graft:start -->

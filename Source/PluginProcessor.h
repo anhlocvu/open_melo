@@ -39,7 +39,7 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     NoteManager& getNoteManager();
-    AuditionVoice& getAuditionVoice() { return auditionVoice; }
+    AuditionVoice& getAuditionVoice();
 
     bool isBoundToARAMode() const { return isBoundToARA(); }
 

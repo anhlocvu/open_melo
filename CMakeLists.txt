@@ -34,6 +34,7 @@ target_sources(OpenMelo
     PRIVATE
         Source/NvdaBridge.h
         Source/NoteModel.h
+        Source/PitchDetector.h
         Source/PitchShiftEngine.h
         Source/PitchShiftEngine.cpp
         Source/AuditionVoice.h
@@ -51,6 +52,7 @@ target_include_directories(OpenMelo
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/Source
         ${CMAKE_CURRENT_SOURCE_DIR}/libs/nvda
+        ${CMAKE_CURRENT_SOURCE_DIR}/libs/signalsmith
 )
 
 target_compile_definitions(OpenMelo

@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "NoteManager.h"
+#include "AuditionVoice.h"
 #include <set>
 #include <memory>
 
@@ -44,7 +45,25 @@ private:
 class OpenMeloEditorRenderer : public juce::ARAEditorRenderer
 {
 public:
-    using juce::ARAEditorRenderer::ARAEditorRenderer;
+    explicit OpenMeloEditorRenderer(ARA::PlugIn::DocumentController* dc);
+
+    void prepareToPlay(double sampleRate,
+                       int maximumSamplesPerBlock,
+                       int numChannels,
+                       juce::AudioProcessor::ProcessingPrecision,
+                       AlwaysNonRealtime alwaysNonRealtime) override;
+    void releaseResources() override;
+
+    bool processBlock(juce::AudioBuffer<float>& buffer,
+                      juce::AudioProcessor::Realtime realtime,
+                      const juce::AudioPlayHead::PositionInfo& positionInfo) noexcept override;
+
+private:
+    double sampleRate = 44100.0;
+    int maximumSamplesPerBlock = 4096;
+    int numChannels = 2;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenMeloEditorRenderer)
 };
 
 //==============================================================================
@@ -58,10 +77,20 @@ public:
 class OpenMeloDocumentController : public juce::ARADocumentControllerSpecialisation
 {
 public:
-    using juce::ARADocumentControllerSpecialisation::ARADocumentControllerSpecialisation;
+    template <typename... Args>
+    explicit OpenMeloDocumentController(Args&&... args)
+        : juce::ARADocumentControllerSpecialisation(std::forward<Args>(args)...)
+    {
+        noteManager.onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
+        {
+            auditionVoice.startPlayback(buf);
+        };
+    }
+
     ~OpenMeloDocumentController() override = default;
 
     NoteManager& getNoteManager() { return noteManager; }
+    AuditionVoice& getAuditionVoice() { return auditionVoice; }
 
     // ARADocument::Listener callbacks
     void didAddAudioSourceToDocument(juce::ARADocument* document, juce::ARAAudioSource* audioSource) override;
@@ -87,6 +116,7 @@ protected:
 
 private:
     NoteManager noteManager;
+    AuditionVoice auditionVoice;
     std::set<juce::ARAAudioSource*> scannedSources;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenMeloDocumentController)

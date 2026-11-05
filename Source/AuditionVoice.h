@@ -47,6 +47,11 @@ public:
         playheadPosition.store(0);
     }
 
+    bool isPlayingNow() const
+    {
+        return isPlaying.load();
+    }
+
     // Called on Audio Realtime Thread
     void renderNextBlock(juce::AudioBuffer<float>& outputBuffer, int startSample, int numSamples)
     {

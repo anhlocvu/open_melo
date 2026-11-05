@@ -16,6 +16,12 @@ void OpenMeloPlaybackRenderer::prepareToPlay(double sampleRateIn,
     sampleRate = sampleRateIn;
     maximumSamplesPerBlock = maximumSamplesPerBlockIn;
     numChannels = numChannelsIn;
+
+    if (auto* doc = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(getDocumentController()))
+    {
+        doc->getNoteManager().setSampleRate(sampleRateIn);
+        doc->getAuditionVoice().setSampleRate(sampleRateIn);
+    }
 }
 
 void OpenMeloPlaybackRenderer::releaseResources()
@@ -72,11 +78,69 @@ bool OpenMeloPlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer,
             didRenderAnyRegion = true;
         }
 
-        // Apply tuned TD-PSOLA note replacement from NoteManager
+        // Apply tuned note replacement from NoteManager
         doc->getNoteManager().renderTrackPlayback(buffer, timeInSamples, numSamples);
     }
 
     if (!didRenderAnyRegion && isPlaying)
+    {
+        buffer.clear();
+    }
+
+    // ALWAYS mix in audition voice (previewing via P, arrows, etc.), even when DAW transport is STOPPED!
+    if (doc->getAuditionVoice().isPlayingNow())
+    {
+        if (!isPlaying)
+            buffer.clear();
+        doc->getAuditionVoice().renderNextBlock(buffer, 0, numSamples);
+    }
+
+    return true;
+}
+
+//==============================================================================
+OpenMeloEditorRenderer::OpenMeloEditorRenderer(ARA::PlugIn::DocumentController* dc)
+    : juce::ARAEditorRenderer(dc)
+{
+}
+
+void OpenMeloEditorRenderer::prepareToPlay(double sampleRateIn,
+                                           int maximumSamplesPerBlockIn,
+                                           int numChannelsIn,
+                                           juce::AudioProcessor::ProcessingPrecision,
+                                           AlwaysNonRealtime)
+{
+    sampleRate = sampleRateIn;
+    maximumSamplesPerBlock = maximumSamplesPerBlockIn;
+    numChannels = numChannelsIn;
+
+    if (auto* doc = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(getDocumentController()))
+    {
+        doc->getAuditionVoice().setSampleRate(sampleRateIn);
+    }
+}
+
+void OpenMeloEditorRenderer::releaseResources()
+{
+}
+
+bool OpenMeloEditorRenderer::processBlock(juce::AudioBuffer<float>& buffer,
+                                          juce::AudioProcessor::Realtime realtime,
+                                          const juce::AudioPlayHead::PositionInfo& positionInfo) noexcept
+{
+    juce::ignoreUnused(realtime, positionInfo);
+    const auto numSamples = buffer.getNumSamples();
+
+    auto* doc = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(getDocumentController());
+    if (doc == nullptr)
+        return true;
+
+    if (doc->getAuditionVoice().isPlayingNow())
+    {
+        buffer.clear();
+        doc->getAuditionVoice().renderNextBlock(buffer, 0, numSamples);
+    }
+    else
     {
         buffer.clear();
     }
