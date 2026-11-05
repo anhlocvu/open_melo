@@ -174,7 +174,7 @@ void NoteManager::processIncomingTrackAudio(const juce::AudioBuffer<float>& buff
     liveTrackAccumulatorLeft.insert(liveTrackAccumulatorLeft.end(), inL, inL + numSamples);
     liveTrackAccumulatorRight.insert(liveTrackAccumulatorRight.end(), inR, inR + numSamples);
 
-    int windowSize = 1024;
+    int windowSize = 2048;
     int hopSize = 512;
 
     while ((int)liveTrackAccumulatorLeft.size() >= windowSize)
@@ -193,7 +193,7 @@ void NoteManager::processIncomingTrackAudio(const juce::AudioBuffer<float>& buff
         double pitchMidi = 0.0;
         if (rms > 0.008f)
         {
-            pitchMidi = detectPitchAutocorr(winL, windowSize);
+            pitchMidi = detectPitchYin(winL, windowSize);
         }
 
         int64_t approxSampleTime = hostPlayheadSample + numSamples - (int64_t)liveTrackAccumulatorLeft.size();
@@ -307,7 +307,7 @@ bool NoteManager::scanAudioBuffer(const juce::AudioBuffer<float>& buffer, double
     const float* channelDataL = buffer.getReadPointer(0);
     const float* channelDataR = (buffer.getNumChannels() > 1) ? buffer.getReadPointer(1) : channelDataL;
 
-    int windowSize = 1024;
+    int windowSize = 2048;
     int hopSize = 512;
     int pos = 0;
 
@@ -334,7 +334,7 @@ bool NoteManager::scanAudioBuffer(const juce::AudioBuffer<float>& buffer, double
         double pitchMidi = 0.0;
         if (rms > 0.008f)
         {
-            pitchMidi = detectPitchAutocorr(winPtrL, windowSize);
+            pitchMidi = detectPitchYin(winPtrL, windowSize);
         }
 
         if (pitchMidi > 0.0)
@@ -694,50 +694,100 @@ int NoteManager::sliceCurrentNoteIntoPieces(int targetSegmentMs)
     return count;
 }
 
-double NoteManager::detectPitchAutocorr(const float* buffer, int length)
+double NoteManager::detectPitchYin(const float* buffer, int length)
 {
-    if (length <= 256)
+    if (length <= 256 || sampleRate <= 0.0)
         return 0.0;
 
-    int minLag = (int)(sampleRate / 1000.0); // 1000 Hz
-    int maxLag = (int)(sampleRate / 60.0);   // 60 Hz
+    int minLag = juce::jmax(2, (int)(sampleRate / 1000.0)); // 1000 Hz ceiling
+    int maxLag = (int)(sampleRate / 60.0);                   // 60 Hz floor
     maxLag = juce::jmin(maxLag, length / 2);
 
-    float maxCorr = 0.0f;
-    int bestLag = -1;
-
-    float r0 = 0.0f;
-    for (int i = 0; i < length - maxLag; ++i)
-    {
-        r0 += buffer[i] * buffer[i];
-    }
-
-    if (r0 < 1e-4f)
+    if (maxLag <= minLag)
         return 0.0;
 
-    for (int lag = minLag; lag <= maxLag; ++lag)
-    {
-        float corr = 0.0f;
-        for (int i = 0; i < length - maxLag; ++i)
-        {
-            corr += buffer[i] * buffer[i + lag];
-        }
+    int winLen = length - maxLag;
 
-        if (corr > maxCorr)
+    // 1. Difference function
+    std::vector<float> d(maxLag + 1, 0.0f);
+    for (int tau = 1; tau <= maxLag; ++tau)
+    {
+        float diffSum = 0.0f;
+        for (int i = 0; i < winLen; ++i)
         {
-            maxCorr = corr;
-            bestLag = lag;
+            float delta = buffer[i] - buffer[i + tau];
+            diffSum += delta * delta;
+        }
+        d[tau] = diffSum;
+    }
+
+    // 2. Cumulative Mean Normalized Difference Function (CMNDF)
+    std::vector<float> dPrime(maxLag + 1, 1.0f);
+    float runningSum = 0.0f;
+    for (int tau = 1; tau <= maxLag; ++tau)
+    {
+        runningSum += d[tau];
+        if (runningSum > 1e-7f)
+            dPrime[tau] = (d[tau] * (float)tau) / runningSum;
+        else
+            dPrime[tau] = 1.0f;
+    }
+
+    // 3. Absolute thresholding & local minimum search (YIN primary peak selection)
+    const float threshold = 0.15f;
+    int tauChosen = -1;
+
+    for (int tau = minLag; tau < maxLag; ++tau)
+    {
+        if (dPrime[tau] < threshold)
+        {
+            while (tau + 1 <= maxLag && dPrime[tau + 1] < dPrime[tau])
+                ++tau;
+            tauChosen = tau;
+            break;
         }
     }
 
-    if (bestLag > 0 && (maxCorr / r0) > 0.45f)
+    // Fallback: If no dip below 0.15, find global minimum if sufficiently periodic (< 0.40)
+    if (tauChosen == -1)
     {
-        double freq = sampleRate / (double)bestLag;
-        double midi = 69.0 + 12.0 * std::log2(freq / 440.0);
-        return midi;
+        float bestVal = 1.0f;
+        for (int tau = minLag; tau <= maxLag; ++tau)
+        {
+            if (dPrime[tau] < bestVal)
+            {
+                bestVal = dPrime[tau];
+                tauChosen = tau;
+            }
+        }
+        if (bestVal > 0.40f)
+            return 0.0; // Unvoiced / noise
     }
 
-    return 0.0;
+    // 4. Parabolic interpolation for sub-cent precision
+    double refinedTau = (double)tauChosen;
+    if (tauChosen > minLag && tauChosen < maxLag)
+    {
+        float s0 = dPrime[tauChosen - 1];
+        float s1 = dPrime[tauChosen];
+        float s2 = dPrime[tauChosen + 1];
+        float denom = 2.0f * (s0 - 2.0f * s1 + s2);
+        if (std::abs(denom) > 1e-7f)
+        {
+            float delta = (s0 - s2) / denom;
+            refinedTau += (double)delta;
+        }
+    }
+
+    if (refinedTau <= 0.0)
+        return 0.0;
+
+    double freq = sampleRate / refinedTau;
+    if (freq < 50.0 || freq > 1200.0)
+        return 0.0;
+
+    double midi = 69.0 + 12.0 * std::log2(freq / 440.0);
+    return midi;
 }
 
 void NoteManager::renderAndAuditionNote(OpenMeloNote& note)

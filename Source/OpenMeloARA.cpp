@@ -16,6 +16,10 @@ void OpenMeloPlaybackRenderer::prepareToPlay(double sampleRateIn,
     sampleRate = sampleRateIn;
     maximumSamplesPerBlock = maximumSamplesPerBlockIn;
     numChannels = numChannelsIn;
+
+    auto* doc = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(getDocumentController());
+    if (doc != nullptr)
+        doc->setTargetSampleRate(sampleRateIn);
 }
 
 void OpenMeloPlaybackRenderer::releaseResources()
@@ -72,7 +76,7 @@ bool OpenMeloPlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer,
             didRenderAnyRegion = true;
         }
 
-        // Apply tuned TD-PSOLA note replacement from NoteManager
+        // Apply tuned note replacement from NoteManager
         doc->getNoteManager().renderTrackPlayback(buffer, timeInSamples, numSamples);
     }
 
@@ -81,10 +85,66 @@ bool OpenMeloPlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer,
         buffer.clear();
     }
 
+    // Mix in user Audition voice for keyboard preview (P, Arrow keys)
+    doc->getAuditionVoice().renderNextBlock(buffer, 0, numSamples);
+
     return true;
 }
 
 //==============================================================================
+OpenMeloEditorRenderer::OpenMeloEditorRenderer(ARA::PlugIn::DocumentController* dc)
+    : juce::ARAEditorRenderer(dc)
+{
+}
+
+void OpenMeloEditorRenderer::prepareToPlay(double sampleRateIn,
+                                           int maximumSamplesPerBlockIn,
+                                           int numChannelsIn,
+                                           juce::AudioProcessor::ProcessingPrecision,
+                                           AlwaysNonRealtime)
+{
+    sampleRate = sampleRateIn;
+    maximumSamplesPerBlock = maximumSamplesPerBlockIn;
+    numChannels = numChannelsIn;
+
+    auto* doc = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(getDocumentController());
+    if (doc != nullptr)
+        doc->setTargetSampleRate(sampleRateIn);
+}
+
+void OpenMeloEditorRenderer::releaseResources()
+{
+}
+
+void OpenMeloEditorRenderer::reset()
+{
+}
+
+bool OpenMeloEditorRenderer::processBlock(juce::AudioBuffer<float>& buffer,
+                                          juce::AudioProcessor::Realtime realtime,
+                                          const juce::AudioPlayHead::PositionInfo& positionInfo) noexcept
+{
+    juce::ignoreUnused(realtime, positionInfo);
+    auto* doc = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(getDocumentController());
+    if (doc == nullptr)
+        return true;
+
+    // Audition keyboard note preview when DAW host is stopped
+    doc->getAuditionVoice().renderNextBlock(buffer, 0, buffer.getNumSamples());
+    return true;
+}
+
+//==============================================================================
+OpenMeloDocumentController::OpenMeloDocumentController(const ARA::PlugIn::PlugInEntry* entry,
+                                                       const ARA::ARADocumentControllerHostInstance* hostInstance)
+    : juce::ARADocumentControllerSpecialisation(entry, hostInstance)
+{
+    noteManager.onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
+    {
+        auditionVoice.startPlayback(buf);
+    };
+}
+
 juce::ARAAudioModification* OpenMeloDocumentController::doCreateAudioModification(
     juce::ARAAudioSource* audioSource,
     ARA::ARAAudioModificationHostRef hostRef,
@@ -163,7 +223,8 @@ void OpenMeloDocumentController::scanAudioSourceForRegion(juce::ARAPlaybackRegio
 
     // Calculate timeline start position of sample 0 of the audio source
     double timeOffset = playbackRegion->getStartInPlaybackTime() - playbackRegion->getStartInAudioModificationTime();
-    int64_t startTimelineSample = (int64_t)(timeOffset * sRate);
+    double effectiveRate = (targetSampleRate > 0.0) ? targetSampleRate : sRate;
+    int64_t startTimelineSample = (int64_t)(timeOffset * effectiveRate);
     if (startTimelineSample < 0)
         startTimelineSample = 0;
 
@@ -201,7 +262,7 @@ bool OpenMeloDocumentController::doRestoreObjectsFromStream(juce::ARAInputStream
     if (blockSize > 0 && !input.failed())
     {
         juce::MemoryBlock block((size_t)blockSize);
-        if (input.read(block.getData(), (size_t)blockSize))
+        if (input.read(block.getData(), (int)blockSize))
         {
             juce::MemoryInputStream memStream(block, false);
             noteManager.deserialize(memStream);

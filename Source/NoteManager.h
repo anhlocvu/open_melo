@@ -78,7 +78,7 @@ private:
     int64_t currentNoteTimelineStart = 0;
     int64_t lastProcessedHostSample = -1;
 
-    double detectPitchAutocorr(const float* buffer, int length);
+    double detectPitchYin(const float* buffer, int length);
     void finalizeCurrentTrackNote(int64_t currentEndSample);
     void sortNotes();
 
