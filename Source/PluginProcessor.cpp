@@ -37,6 +37,11 @@ bool OpenMeloAudioProcessor::isMidiEffect() const
 
 double OpenMeloAudioProcessor::getTailLengthSeconds() const
 {
+    // Return infinite tail in ARA mode (Vst::kInfiniteTail) so the DAW never suspends
+    // processBlock when transport is stopped and the user is auditioning notes in the editor.
+    if (isBoundToARA())
+        return std::numeric_limits<double>::infinity();
+
     double tail = 0.0;
     if (getTailLengthSecondsForARA(tail))
         return tail;
@@ -158,17 +163,25 @@ void OpenMeloAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         if (!processBlockForARA(buffer, isRealtime(), getPlayHead()))
             processBlockBypassed(buffer, midiMessages);
 
-        // Mix in user Audition voice exactly once per block on the active playback renderer
-        // (or on the editor renderer if no playback renderer is active).
+        // In ARA hosts (e.g., Reaper), the Track FX instance holds the EditorRenderer role and runs
+        // continuously even when transport is STOPPED, while the Media Item instance holds PlaybackRenderer.
+        // Always mix AuditionVoice on the EditorRenderer (without clearing the incoming buffer!),
+        // and fallback to PlaybackRenderer if no EditorRenderer has processed recently (> 50ms).
         auto* doc = resolveDocumentController();
-        if (getPlaybackRenderer() != nullptr)
+        if (getEditorRenderer() != nullptr)
         {
+            if (doc != nullptr)
+                doc->notifyEditorRendererProcessed();
             getAuditionVoice().renderNextBlock(buffer, 0, numSamples);
         }
-        else if (getEditorRenderer() != nullptr && (doc == nullptr || doc->getActivePlaybackRendererCount() == 0))
+        else if (getPlaybackRenderer() != nullptr)
         {
-            buffer.clear();
-            getAuditionVoice().renderNextBlock(buffer, 0, numSamples);
+            const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
+            const juce::uint32 lastEdMs = (doc != nullptr) ? doc->getLastEditorProcessTimeMs() : 0;
+            if (lastEdMs == 0 || (nowMs - lastEdMs) > 50)
+            {
+                getAuditionVoice().renderNextBlock(buffer, 0, numSamples);
+            }
         }
 
         return;

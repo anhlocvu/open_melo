@@ -300,7 +300,8 @@
    - **Nguyên nhân 3 (`SignalsmithStretch::presetDefault` cửa sổ 120ms & không đệm biên)**: Cửa sổ mặc định 120ms (`seekLength` 150ms) quá dài cho nốt vocal ngắn, cộng với việc gọi `stretch.exact()` không có padding khiến phần đuôi của mọi nốt bị trộn với `flush(zeros)` đảo pha.
    - **Nguyên nhân 4 (`PitchDetector` MPM)**: Tìm mọi cực đại cục bộ với ngưỡng `0.85` khiến Formant $F_1$ mạnh dễ làm nhảy lên họa âm bậc 2/3.
    - **Giải pháp**:
-     - Chỉ tiêu thụ `AuditionVoice::renderNextBlock` **đúng 1 lần duy nhất mỗi block** kèm ramp 64 mẫu chống nổ tiếng (`AuditionVoice.h`).
+     - Trong chế độ ARA (Reaper/Studio One/Cubase), ưu tiên trộn (`addFrom` không xóa buffer) `AuditionVoice::renderNextBlock` trực tiếp trên instance `EditorRenderer` (nằm trên Track FX Chain — luôn chạy ngay cả khi DAW đang STOP!) và tự động fallback sang `PlaybackRenderer` nếu `EditorRenderer` không hoạt động trong $> 50\text{ ms}$, đồng thời báo cáo `getTailLengthSeconds() = infinity()` (`Vst::kInfiniteTail`) để DAW không bao giờ ngắt luồng audio khi STOP.
+     - Kèm theo ramp 64 mẫu chống nổ tiếng (`AuditionVoice.h`) và chỉ tiêu thụ **đúng 1 lần duy nhất mỗi block**.
      - Trích xuất lát cắt mẫu **liên tục 100%** `[segmentStartPos .. segmentEndPos)` trực tiếp từ buffer gốc trong `NoteManager::scanAudioBuffer`, đồng thời áp dụng hòa trộn tuyến tính (true linear crossfade) `dest * (1 - alpha) + src * alpha` tại biên nốt trong `renderTrackPlayback`.
      - Cấu hình cửa sổ STFT chuyên biệt cho giọng hát đơn âm (`~46ms` block / `~11.5ms` hop) trong `PitchShiftEngine::process`, và **luôn luôn đệm phản xạ có cửa sổ Cosine (`pad = seekLen`)** ở cả hai đầu cho mọi nốt hát để 100% nốt nằm trong vùng steady-state.
      - Chuẩn hóa thuật toán **Key Maxima** (1 đỉnh cao nhất trên mỗi miền dương, ngưỡng $k = 0.93$) trong `PitchDetector.h`.

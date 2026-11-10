@@ -111,6 +111,9 @@ public:
     void decrementActivePlaybackRenderers() noexcept { --activePlaybackRendererCount; }
     int getActivePlaybackRendererCount() const noexcept { return activePlaybackRendererCount.load(); }
 
+    void notifyEditorRendererProcessed() noexcept { lastEditorProcessTimeMs.store(juce::Time::getMillisecondCounter()); }
+    juce::uint32 getLastEditorProcessTimeMs() const noexcept { return lastEditorProcessTimeMs.load(); }
+
     // ARADocument::Listener callbacks
     void didEndEditing(juce::ARADocument* document) override;
     void didAddAudioSourceToDocument(juce::ARADocument* document, juce::ARAAudioSource* audioSource) override;
@@ -173,6 +176,7 @@ private:
     double dawSampleRate = 0.0;
     bool stateRestoredFromArchive = false;
     std::atomic<int> activePlaybackRendererCount { 0 };
+    std::atomic<juce::uint32> lastEditorProcessTimeMs { 0 };
 
     std::map<juce::ARAAudioSource*, juce::AudioBuffer<float>> cachedSourceBuffers;
     std::map<juce::ARAPlaybackRegion*, ScannedRegionInfo> scannedRegions;
