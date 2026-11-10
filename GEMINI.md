@@ -1,3 +1,7 @@
+## quy tắc dự án
+
+1. trong mọi trường hợp phát triển, luôn luôn tự động tuân thủ quy trình specify
+
 # Nhật Ký Dự Án Open Melo (GEMINI.md)
 
 ## Thông Tin Dự Án
