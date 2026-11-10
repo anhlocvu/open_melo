@@ -16,17 +16,20 @@ NoteManager::~NoteManager()
 
 void NoteManager::clearNotes()
 {
-    notes.clear();
-    selectedNoteIndex = 0;
-    liveTrackAccumulatorLeft.clear();
-    liveTrackAccumulatorRight.clear();
-    currentNoteAudioLeft.clear();
-    currentNoteAudioRight.clear();
-    currentNotePitchSum = 0.0;
-    currentNotePitchCount = 0;
-    silenceFrameCount = 0;
-    currentNoteTimelineStart = 0;
-    lastProcessedHostSample = -1;
+    {
+        const juce::SpinLock::ScopedLockType sl(notesLock);
+        notes.clear();
+        selectedNoteIndex = 0;
+        liveTrackAccumulatorLeft.clear();
+        liveTrackAccumulatorRight.clear();
+        currentNoteAudioLeft.clear();
+        currentNoteAudioRight.clear();
+        currentNotePitchSum = 0.0;
+        currentNotePitchCount = 0;
+        silenceFrameCount = 0;
+        currentNoteTimelineStart = 0;
+        lastProcessedHostSample = -1;
+    }
 
     if (onNotesChanged)
         onNotesChanged();
@@ -34,7 +37,15 @@ void NoteManager::clearNotes()
 
 void NoteManager::setSampleRate(double newSampleRate)
 {
-    sampleRate = (newSampleRate > 0.0) ? newSampleRate : 44100.0;
+    double validRate = (newSampleRate > 0.0) ? newSampleRate : 44100.0;
+    if (std::abs(sampleRate - validRate) < 0.5)
+    {
+        pitchEngine.setSampleRate(sampleRate);
+        return;
+    }
+
+    const juce::SpinLock::ScopedLockType sl(notesLock);
+    sampleRate = validRate;
     pitchEngine.setSampleRate(sampleRate);
 
     for (auto& n : notes)
@@ -94,7 +105,11 @@ void NoteManager::sortNotes()
 
 void NoteManager::renderTrackPlayback(juce::AudioBuffer<float>& buffer, int64_t hostPlayheadSample, int numSamples)
 {
-    if (notes.empty() || numSamples <= 0)
+    if (numSamples <= 0)
+        return;
+
+    const juce::SpinLock::ScopedTryLockType sl(notesLock);
+    if (!sl.isLocked() || notes.empty())
         return;
 
     int64_t blockStart = hostPlayheadSample;
@@ -125,6 +140,8 @@ void NoteManager::renderTrackPlayback(juce::AudioBuffer<float>& buffer, int64_t 
                 if (rendSamples <= 0)
                     continue;
 
+                const int fadeSamples = juce::jmin(64, (int)(note.lengthSamples / 4));
+
                 for (int ch = 0; ch < numChannels; ++ch)
                 {
                     int srcCh = ch % juce::jmax(1, rendChans);
@@ -137,15 +154,18 @@ void NoteManager::renderTrackPlayback(juce::AudioBuffer<float>& buffer, int64_t 
                         for (int i = 0; i < actualCopy; ++i)
                         {
                             int sampleInNote = noteOffset + i;
-                            float gain = 1.0f;
+                            float alpha = 1.0f;
 
-                            // 64-sample crossfade at the boundaries to prevent clicks
-                            if (sampleInNote < 64)
-                                gain = (float)sampleInNote / 64.0f;
-                            else if (sampleInNote > note.lengthSamples - 64)
-                                gain = (float)(note.lengthSamples - sampleInNote) / 64.0f;
+                            // True linear crossfade between original track and tuned note at boundaries
+                            if (fadeSamples > 1)
+                            {
+                                if (sampleInNote < fadeSamples)
+                                    alpha = (float)sampleInNote / (float)fadeSamples;
+                                else if (sampleInNote > note.lengthSamples - fadeSamples)
+                                    alpha = (float)(note.lengthSamples - sampleInNote) / (float)fadeSamples;
+                            }
 
-                            destPtr[i] = srcPtr[sampleInNote] * gain;
+                            destPtr[i] = destPtr[i] * (1.0f - alpha) + srcPtr[sampleInNote] * alpha;
                         }
                     }
                 }
@@ -224,9 +244,25 @@ void NoteManager::processIncomingTrackAudio(const juce::AudioBuffer<float>& buff
         else
         {
             silenceFrameCount++;
-            if (silenceFrameCount >= 4 && !currentNoteAudioLeft.empty())
+            if (!currentNoteAudioLeft.empty())
             {
-                finalizeCurrentTrackNote(approxSampleTime);
+                if (silenceFrameCount < 4)
+                {
+                    // Keep contiguous audio samples across brief unvoiced hops inside a note
+                    currentNoteAudioLeft.insert(currentNoteAudioLeft.end(), winL, winL + hopSize);
+                    currentNoteAudioRight.insert(currentNoteAudioRight.end(), winR, winR + hopSize);
+                }
+                else
+                {
+                    // Trim trailing silence hops that were appended before the note ended
+                    size_t trailingSilenceSamples = (size_t)(silenceFrameCount - 1) * (size_t)hopSize;
+                    if (currentNoteAudioLeft.size() > trailingSilenceSamples)
+                    {
+                        currentNoteAudioLeft.resize(currentNoteAudioLeft.size() - trailingSilenceSamples);
+                        currentNoteAudioRight.resize(currentNoteAudioRight.size() - trailingSilenceSamples);
+                    }
+                    finalizeCurrentTrackNote(approxSampleTime - (int64_t)trailingSilenceSamples);
+                }
             }
         }
 
@@ -280,8 +316,11 @@ void NoteManager::finalizeCurrentTrackNote(int64_t currentEndSample)
             std::copy(currentNoteAudioRight.begin(), currentNoteAudioRight.end(), n.audioData.getWritePointer(1));
 
             updateNoteRendering(n);
-            notes.push_back(n);
-            sortNotes();
+            {
+                const juce::SpinLock::ScopedLockType sl(notesLock);
+                notes.push_back(n);
+                sortNotes();
+            }
 
             if (onNotesChanged)
                 onNotesChanged();
@@ -295,13 +334,19 @@ void NoteManager::finalizeCurrentTrackNote(int64_t currentEndSample)
     silenceFrameCount = 0;
 }
 
-bool NoteManager::scanAudioBuffer(const juce::AudioBuffer<float>& buffer, double fileSampleRate, int64_t startTimelineSample)
+bool NoteManager::scanAudioBuffer(const juce::AudioBuffer<float>& buffer,
+                                  double fileSampleRate,
+                                  int64_t startTimelineSample,
+                                  bool appendMode,
+                                  bool announceSpeech)
 {
     int numSamples = buffer.getNumSamples();
     if (numSamples <= 0)
         return false;
 
-    clearNotes();
+    if (!appendMode)
+        clearNotes();
+
     setSampleRate(fileSampleRate);
 
     const float* channelDataL = buffer.getReadPointer(0);
@@ -311,12 +356,45 @@ bool NoteManager::scanAudioBuffer(const juce::AudioBuffer<float>& buffer, double
     int hopSize = 512;
     int pos = 0;
 
-    std::vector<float> segmentAudioL;
-    std::vector<float> segmentAudioR;
+    int segmentStartPos = -1;
+    int segmentEndPos = -1;
     double segmentPitchSum = 0.0;
     int segmentPitchCount = 0;
     int silenceCount = 0;
-    int64_t segmentStartSample = 0;
+
+    std::vector<OpenMeloNote> newlyScannedNotes;
+
+    auto commitSegment = [&]()
+    {
+        if (segmentStartPos >= 0 && segmentEndPos > segmentStartPos && segmentPitchCount > 0)
+        {
+            int noteLen = juce::jmin(segmentEndPos - segmentStartPos, numSamples - segmentStartPos);
+            if (noteLen >= (int)(sampleRate * 0.08))
+            {
+                OpenMeloNote n;
+                n.id = 0;
+                n.startSample = startTimelineSample + (int64_t)segmentStartPos;
+                n.lengthSamples = (int64_t)noteLen;
+                n.originalPitchMidi = segmentPitchSum / (double)segmentPitchCount;
+                n.semitoneOffset = 0;
+                n.centsOffset = 0;
+
+                // Extract 100% contiguous audio slice directly from source buffer (never dropping inner hops)
+                n.audioData.setSize(2, noteLen);
+                std::copy(channelDataL + segmentStartPos, channelDataL + segmentStartPos + noteLen, n.audioData.getWritePointer(0));
+                std::copy(channelDataR + segmentStartPos, channelDataR + segmentStartPos + noteLen, n.audioData.getWritePointer(1));
+
+                updateNoteRendering(n);
+                newlyScannedNotes.push_back(std::move(n));
+            }
+        }
+
+        segmentStartPos = -1;
+        segmentEndPos = -1;
+        segmentPitchSum = 0.0;
+        segmentPitchCount = 0;
+        silenceCount = 0;
+    };
 
     while (pos + windowSize <= numSamples)
     {
@@ -339,44 +417,23 @@ bool NoteManager::scanAudioBuffer(const juce::AudioBuffer<float>& buffer, double
 
         if (pitchMidi > 0.0)
         {
-            if (segmentAudioL.empty())
+            if (segmentStartPos < 0)
             {
-                segmentStartSample = startTimelineSample + pos;
+                segmentStartPos = pos;
+                segmentEndPos = pos + hopSize;
             }
             else if (segmentPitchCount > 0)
             {
-                double currentAvg = segmentPitchSum / segmentPitchCount;
+                double currentAvg = segmentPitchSum / (double)segmentPitchCount;
                 if (std::abs(pitchMidi - currentAvg) > 1.0)
                 {
-                    // Note change detected
-                    if (segmentAudioL.size() >= (size_t)(sampleRate * 0.08))
-                    {
-                        OpenMeloNote n;
-                        n.id = (int)notes.size() + 1;
-                        n.startSample = segmentStartSample;
-                        n.lengthSamples = (int64_t)segmentAudioL.size();
-                        n.originalPitchMidi = segmentPitchSum / segmentPitchCount;
-                        n.semitoneOffset = 0;
-                        n.centsOffset = 0;
-
-                        n.audioData.setSize(2, (int)n.lengthSamples);
-                        std::copy(segmentAudioL.begin(), segmentAudioL.end(), n.audioData.getWritePointer(0));
-                        std::copy(segmentAudioR.begin(), segmentAudioR.end(), n.audioData.getWritePointer(1));
-
-                        updateNoteRendering(n);
-                        notes.push_back(n);
-                    }
-
-                    segmentAudioL.clear();
-                    segmentAudioR.clear();
-                    segmentPitchSum = 0.0;
-                    segmentPitchCount = 0;
-                    segmentStartSample = startTimelineSample + pos;
+                    commitSegment();
+                    segmentStartPos = pos;
+                    segmentEndPos = pos + hopSize;
                 }
             }
 
-            segmentAudioL.insert(segmentAudioL.end(), winPtrL, winPtrL + hopSize);
-            segmentAudioR.insert(segmentAudioR.end(), winPtrR, winPtrR + hopSize);
+            segmentEndPos = pos + hopSize;
             segmentPitchSum += pitchMidi;
             segmentPitchCount++;
             silenceCount = 0;
@@ -384,50 +441,42 @@ bool NoteManager::scanAudioBuffer(const juce::AudioBuffer<float>& buffer, double
         else
         {
             silenceCount++;
-            if (silenceCount >= 4 && segmentAudioL.size() >= (size_t)(sampleRate * 0.08))
+            if (silenceCount >= 4 && segmentStartPos >= 0)
             {
-                OpenMeloNote n;
-                n.id = (int)notes.size() + 1;
-                n.startSample = segmentStartSample;
-                n.lengthSamples = (int64_t)segmentAudioL.size();
-                n.originalPitchMidi = segmentPitchSum / segmentPitchCount;
-                n.semitoneOffset = 0;
-                n.centsOffset = 0;
-
-                n.audioData.setSize(2, (int)n.lengthSamples);
-                std::copy(segmentAudioL.begin(), segmentAudioL.end(), n.audioData.getWritePointer(0));
-                std::copy(segmentAudioR.begin(), segmentAudioR.end(), n.audioData.getWritePointer(1));
-
-                updateNoteRendering(n);
-                notes.push_back(n);
-
-                segmentAudioL.clear();
-                segmentAudioR.clear();
-                segmentPitchSum = 0.0;
-                segmentPitchCount = 0;
-            }
-            else if (silenceCount >= 4)
-            {
-                segmentAudioL.clear();
-                segmentAudioR.clear();
-                segmentPitchSum = 0.0;
-                segmentPitchCount = 0;
+                commitSegment();
             }
         }
 
         pos += hopSize;
     }
 
-    sortNotes();
-
-    if (!notes.empty())
+    // Commit any remaining active vocal note at the end of the buffer
+    if (segmentStartPos >= 0)
     {
-        selectedNoteIndex = 0;
-        triggerSpeech("Scanned " + juce::String(notes.size()) + " notes from track. Selected: " + notes[0].getSpeechDescription());
+        commitSegment();
     }
-    else
+
     {
-        triggerSpeech("Scanning complete. No vocal notes detected.");
+        const juce::SpinLock::ScopedLockType sl(notesLock);
+        for (auto& n : newlyScannedNotes)
+        {
+            notes.push_back(std::move(n));
+        }
+        sortNotes();
+        if (selectedNoteIndex < 0 || selectedNoteIndex >= (int)notes.size())
+            selectedNoteIndex = 0;
+    }
+
+    if (announceSpeech)
+    {
+        if (!notes.empty())
+        {
+            triggerSpeech("Scanned " + juce::String(notes.size()) + " notes from track. Selected: " + notes[selectedNoteIndex].getSpeechDescription());
+        }
+        else
+        {
+            triggerSpeech("Scanning complete. No vocal notes detected.");
+        }
     }
 
     if (onNotesChanged)
@@ -588,6 +637,18 @@ void NoteManager::snapCurrentNoteToZero()
         onNotesChanged();
 }
 
+void NoteManager::restoreNoteTuning(int index, int semitones, int cents)
+{
+    const juce::SpinLock::ScopedLockType sl(notesLock);
+    if (index < 0 || index >= (int)notes.size())
+        return;
+
+    auto& note = notes[index];
+    note.semitoneOffset = semitones;
+    note.centsOffset = cents;
+    updateNoteRendering(note);
+}
+
 bool NoteManager::splitCurrentNote()
 {
     if (notes.empty())
@@ -627,9 +688,12 @@ bool NoteManager::splitCurrentNote()
     }
     updateNoteRendering(secondHalf);
 
-    notes[selectedNoteIndex] = firstHalf;
-    notes.insert(notes.begin() + selectedNoteIndex + 1, secondHalf);
-    sortNotes();
+    {
+        const juce::SpinLock::ScopedLockType sl(notesLock);
+        notes[selectedNoteIndex] = firstHalf;
+        notes.insert(notes.begin() + selectedNoteIndex + 1, secondHalf);
+        sortNotes();
+    }
 
     renderAndAuditionNote(notes[selectedNoteIndex]);
     triggerSpeech("Split note into 2. " + notes[selectedNoteIndex].getSpeechDescription());
@@ -681,9 +745,12 @@ int NoteManager::sliceCurrentNoteIntoPieces(int targetSegmentMs)
         sliced.push_back(n);
     }
 
-    notes.erase(notes.begin() + selectedNoteIndex);
-    notes.insert(notes.begin() + selectedNoteIndex, sliced.begin(), sliced.end());
-    sortNotes();
+    {
+        const juce::SpinLock::ScopedLockType sl(notesLock);
+        notes.erase(notes.begin() + selectedNoteIndex);
+        notes.insert(notes.begin() + selectedNoteIndex, sliced.begin(), sliced.end());
+        sortNotes();
+    }
 
     renderAndAuditionNote(notes[selectedNoteIndex]);
     triggerSpeech("Sliced note into " + juce::String(count) + " micro segments. " + notes[selectedNoteIndex].getSpeechDescription());
@@ -715,6 +782,7 @@ void NoteManager::triggerSpeech(const juce::String& text)
 
 void NoteManager::serialize(juce::MemoryOutputStream& stream) const
 {
+    const juce::SpinLock::ScopedLockType sl(notesLock);
     stream.writeInt(selectedNoteIndex);
     stream.writeInt((int)notes.size());
 
@@ -744,9 +812,9 @@ void NoteManager::serialize(juce::MemoryOutputStream& stream) const
 
 void NoteManager::deserialize(juce::MemoryInputStream& stream)
 {
-    notes.clear();
+    std::vector<OpenMeloNote> loadedNotes;
 
-    selectedNoteIndex = stream.readInt();
+    int loadedSelectedIndex = stream.readInt();
     int count = stream.readInt();
 
     for (int i = 0; i < count; ++i)
@@ -772,13 +840,18 @@ void NoteManager::deserialize(juce::MemoryInputStream& stream)
         }
 
         updateNoteRendering(n);
-        notes.push_back(n);
+        loadedNotes.push_back(std::move(n));
     }
 
-    if (selectedNoteIndex < 0 || selectedNoteIndex >= (int)notes.size())
-        selectedNoteIndex = 0;
+    {
+        const juce::SpinLock::ScopedLockType sl(notesLock);
+        notes = std::move(loadedNotes);
+        selectedNoteIndex = loadedSelectedIndex;
+        if (selectedNoteIndex < 0 || selectedNoteIndex >= (int)notes.size())
+            selectedNoteIndex = 0;
 
-    sortNotes();
+        sortNotes();
+    }
 
     if (onNotesChanged)
         onNotesChanged();

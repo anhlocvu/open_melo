@@ -71,10 +71,10 @@ void OpenMeloAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBloc
     auditionVoice.setSampleRate(sampleRate);
     fallbackNoteManager.setSampleRate(sampleRate);
 
-    if (documentController != nullptr)
+    if (auto* doc = resolveDocumentController())
     {
-        documentController->getNoteManager().setSampleRate(sampleRate);
-        documentController->getAuditionVoice().setSampleRate(sampleRate);
+        doc->setDawSampleRate(sampleRate);
+        doc->getAuditionVoice().setSampleRate(sampleRate);
     }
 
     prepareToPlayForARA(sampleRate, samplesPerBlock, getMainBusNumOutputChannels(), getProcessingPrecision());
@@ -83,8 +83,8 @@ void OpenMeloAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBloc
 void OpenMeloAudioProcessor::releaseResources()
 {
     auditionVoice.stopPlayback();
-    if (documentController != nullptr)
-        documentController->getAuditionVoice().stopPlayback();
+    if (auto* doc = resolveDocumentController())
+        doc->getAuditionVoice().stopPlayback();
     releaseResourcesForARA();
 }
 
@@ -100,9 +100,10 @@ bool OpenMeloAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) 
     return true;
 }
 
-void OpenMeloAudioProcessor::didBindToARA() noexcept
+OpenMeloDocumentController* OpenMeloAudioProcessor::resolveDocumentController() noexcept
 {
-    AudioProcessorARAExtension::didBindToARA();
+    if (documentController != nullptr)
+        return documentController;
 
     if (auto* pr = getPlaybackRenderer())
         documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(pr->getDocumentController());
@@ -111,53 +112,32 @@ void OpenMeloAudioProcessor::didBindToARA() noexcept
     else if (auto* ev = getEditorView())
         documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(ev->getDocumentController());
 
-    if (documentController != nullptr)
+    return documentController;
+}
+
+void OpenMeloAudioProcessor::didBindToARA() noexcept
+{
+    AudioProcessorARAExtension::didBindToARA();
+    resolveDocumentController();
+    if (documentController != nullptr && getSampleRate() > 0.0)
     {
-        documentController->getNoteManager().onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
-        {
-            if (documentController != nullptr)
-                documentController->getAuditionVoice().startPlayback(buf);
-            else
-                auditionVoice.startPlayback(buf);
-        };
+        documentController->setDawSampleRate(getSampleRate());
+        documentController->getAuditionVoice().setSampleRate(getSampleRate());
     }
 }
 
 NoteManager& OpenMeloAudioProcessor::getNoteManager()
 {
-    if (documentController != nullptr)
-        return documentController->getNoteManager();
-
-    if (auto* pr = getPlaybackRenderer())
-    {
-        documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(pr->getDocumentController());
-        if (documentController != nullptr)
-        {
-            documentController->getNoteManager().onPlayAudition = [this](const juce::AudioBuffer<float>& buf)
-            {
-                if (documentController != nullptr)
-                    documentController->getAuditionVoice().startPlayback(buf);
-                else
-                    auditionVoice.startPlayback(buf);
-            };
-            return documentController->getNoteManager();
-        }
-    }
+    if (auto* doc = resolveDocumentController())
+        return doc->getNoteManager();
 
     return fallbackNoteManager;
 }
 
 AuditionVoice& OpenMeloAudioProcessor::getAuditionVoice()
 {
-    if (documentController != nullptr)
-        return documentController->getAuditionVoice();
-
-    if (auto* pr = getPlaybackRenderer())
-    {
-        documentController = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<OpenMeloDocumentController>(pr->getDocumentController());
-        if (documentController != nullptr)
-            return documentController->getAuditionVoice();
-    }
+    if (auto* doc = resolveDocumentController())
+        return doc->getAuditionVoice();
 
     return auditionVoice;
 }
@@ -178,8 +158,19 @@ void OpenMeloAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
         if (!processBlockForARA(buffer, isRealtime(), getPlayHead()))
             processBlockBypassed(buffer, midiMessages);
 
-        // Mix in user Audition voice for keyboard preview
-        getAuditionVoice().renderNextBlock(buffer, 0, numSamples);
+        // Mix in user Audition voice exactly once per block on the active playback renderer
+        // (or on the editor renderer if no playback renderer is active).
+        auto* doc = resolveDocumentController();
+        if (getPlaybackRenderer() != nullptr)
+        {
+            getAuditionVoice().renderNextBlock(buffer, 0, numSamples);
+        }
+        else if (getEditorRenderer() != nullptr && (doc == nullptr || doc->getActivePlaybackRendererCount() == 0))
+        {
+            buffer.clear();
+            getAuditionVoice().renderNextBlock(buffer, 0, numSamples);
+        }
+
         return;
     }
 
@@ -219,6 +210,8 @@ bool OpenMeloAudioProcessor::hasEditor() const
 
 juce::AudioProcessorEditor* OpenMeloAudioProcessor::createEditor()
 {
+    if (auto* doc = resolveDocumentController())
+        doc->syncRegionsWithDocument();
     return new OpenMeloAudioProcessorEditor(*this);
 }
 

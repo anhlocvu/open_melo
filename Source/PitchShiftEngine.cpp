@@ -41,82 +41,77 @@ void PitchShiftEngine::process(const juce::AudioBuffer<float>& input,
     }
 
     double semitones = 12.0 * std::log2(pitchRatio);
-    double pitchHz = 440.0 * std::pow(2.0, (originalPitchMidi - 69.0) / 12.0);
+    double clampedMidi = juce::jlimit(36.0, 96.0, originalPitchMidi);
+    double pitchHz = 440.0 * std::pow(2.0, (clampedMidi - 69.0) / 12.0);
+
+    // Vocal-optimized STFT configuration (~46ms window / ~11.5ms hop -> 2048 FFT @ 44.1/48kHz)
+    // Eliminates the 120ms window phase-smearing and robotic tail of presetDefault
+    int blockSamples = juce::jmax(512, (int)std::round(sampleRate * 0.046));
+    int intervalSamples = juce::jmax(128, blockSamples / 4);
 
     signalsmith::stretch::SignalsmithStretch<float> stretch;
-    stretch.presetDefault(numChannels, (float)sampleRate);
+    stretch.configure(numChannels, blockSamples, intervalSamples, false);
 
-    // 1. Tonality limit preserves vocal timbre above 8kHz
+    // 1. Tonality limit preserves natural vocal breath/sibilants above 8kHz
     stretch.setTransposeSemitones((float)semitones, 8000.0f / (float)sampleRate);
 
     // 2. Formant preservation: compensate pitch shift so vocal tract formants stay at original frequency
     stretch.setFormantSemitones(0.0f, true);
     stretch.setFormantBase((float)(pitchHz / sampleRate));
 
-    auto seekLen = stretch.outputSeekLength(1.0f);
+    // Always pad both ends by seekLen so 100% of the vocal note is processed in steady-state
+    // and never contaminated by outputSeek startup or flush(zeros) phase-inversion tail.
+    const int seekLen = juce::jmax(blockSamples + intervalSamples, stretch.outputSeekLength(1.0f));
+    const int pad = seekLen;
+    const int paddedLen = inSamples + 2 * pad;
 
-    if (inSamples >= seekLen)
+    juce::AudioBuffer<float> paddedInput(numChannels, paddedLen);
+    juce::AudioBuffer<float> paddedOutput(numChannels, paddedLen);
+
+    for (int ch = 0; ch < numChannels; ++ch)
     {
-        std::vector<const float*> inPtrs(numChannels);
-        std::vector<float*> outPtrs(numChannels);
+        const float* src = input.getReadPointer(ch);
+        float* dest = paddedInput.getWritePointer(ch);
+
+        // Copy main note into the center
+        std::copy(src, src + inSamples, dest + pad);
+
+        // Smoothly tapered mirrored padding on the left and right
+        for (int i = 0; i < pad; ++i)
+        {
+            float taper = 0.5f * (1.0f + std::cos(juce::MathConstants<float>::pi * (float)i / (float)pad));
+            dest[pad - 1 - i] = src[i % inSamples] * taper;
+            dest[pad + inSamples + i] = src[inSamples - 1 - (i % inSamples)] * taper;
+        }
+    }
+
+    std::vector<const float*> inPtrs(numChannels);
+    std::vector<float*> outPtrs(numChannels);
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        inPtrs[ch] = paddedInput.getReadPointer(ch);
+        outPtrs[ch] = paddedOutput.getWritePointer(ch);
+    }
+
+    bool success = stretch.exact(inPtrs.data(), paddedLen, outPtrs.data(), paddedLen);
+    if (success)
+    {
         for (int ch = 0; ch < numChannels; ++ch)
         {
-            inPtrs[ch] = input.getReadPointer(ch);
-            outPtrs[ch] = output.getWritePointer(ch);
+            output.copyFrom(ch, 0, paddedOutput, ch, pad, inSamples);
         }
 
-        bool success = stretch.exact(inPtrs.data(), inSamples, outPtrs.data(), inSamples);
-        if (!success)
+        // Apply subtle 32-sample micro-fade at note boundaries to ensure click-free auditioning
+        const int fadeLen = juce::jmin(32, inSamples / 4);
+        if (fadeLen > 1)
         {
-            output.makeCopyOf(input);
+            output.applyGainRamp(0, fadeLen, 0.0f, 1.0f);
+            output.applyGainRamp(inSamples - fadeLen, fadeLen, 1.0f, 0.0f);
         }
     }
     else
     {
-        // For short segments (< seekLen), pad with mirrored/reflected audio at both ends
-        int pad = seekLen;
-        int paddedLen = inSamples + 2 * pad;
-
-        juce::AudioBuffer<float> paddedInput(numChannels, paddedLen);
-        juce::AudioBuffer<float> paddedOutput(numChannels, paddedLen);
-
-        for (int ch = 0; ch < numChannels; ++ch)
-        {
-            const float* src = input.getReadPointer(ch);
-            float* dest = paddedInput.getWritePointer(ch);
-
-            // Copy middle
-            std::copy(src, src + inSamples, dest + pad);
-
-            // Reflect left
-            for (int i = 0; i < pad; ++i)
-                dest[pad - 1 - i] = src[i % inSamples];
-
-            // Reflect right
-            for (int i = 0; i < pad; ++i)
-                dest[pad + inSamples + i] = src[(inSamples - 1 - (i % inSamples))];
-        }
-
-        std::vector<const float*> inPtrs(numChannels);
-        std::vector<float*> outPtrs(numChannels);
-        for (int ch = 0; ch < numChannels; ++ch)
-        {
-            inPtrs[ch] = paddedInput.getReadPointer(ch);
-            outPtrs[ch] = paddedOutput.getWritePointer(ch);
-        }
-
-        bool success = stretch.exact(inPtrs.data(), paddedLen, outPtrs.data(), paddedLen);
-        if (success)
-        {
-            for (int ch = 0; ch < numChannels; ++ch)
-            {
-                output.copyFrom(ch, 0, paddedOutput, ch, pad, inSamples);
-            }
-        }
-        else
-        {
-            output.makeCopyOf(input);
-        }
+        output.makeCopyOf(input);
     }
 }
 
@@ -158,7 +153,8 @@ void PitchShiftEngine::generateVocalTone(juce::AudioBuffer<float>& buffer,
             double harmonicFreq = f0 * h;
             double sourceAmp = 1.0 / (double)h;
 
-            double formantAmp = calcFormantGain(harmonicFreq, f1, bw1) * 1.0
+            double formantAmp = 0.25
+                              + calcFormantGain(harmonicFreq, f1, bw1) * 1.0
                               + calcFormantGain(harmonicFreq, f2, bw2) * 0.6
                               + calcFormantGain(harmonicFreq, f3, bw3) * 0.3;
 

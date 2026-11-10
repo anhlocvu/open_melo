@@ -8,25 +8,27 @@
 class PitchDetector
 {
 public:
-    // McLeod Pitch Method (MPM) - Normalized Square Difference Function (NSDF) with parabolic interpolation
+    // McLeod Pitch Method (MPM) - Normalized Square Difference Function (NSDF) with Key Maxima & Parabolic Interpolation
     // Accurately extracts fundamental frequency (F0) and MIDI pitch for vocal audio
-    // Prevents octave jumps, subharmonic errors, and eliminates semitone detuning
-    static double detectPitch(const float* buffer, int length, double sampleRate, float clarityThreshold = 0.45f)
+    // Immune to formant-induced harmonic octave jumps and subharmonic errors
+    static double detectPitch(const float* buffer, int length, double sampleRate, float clarityThreshold = 0.50f)
     {
         if (length <= 256 || sampleRate <= 0.0 || buffer == nullptr)
             return 0.0;
 
         int maxTau = length / 2;
-        int minLag = juce::jmax(2, (int)(sampleRate / 1200.0));    // up to ~1200 Hz
-        int maxLag = juce::jmin(maxTau, (int)(sampleRate / 55.0)); // down to ~55 Hz (A1)
+        int minLag = juce::jmax(2, (int)(sampleRate / 1100.0));   // up to ~1100 Hz (C6)
+        int maxLag = juce::jmin(maxTau, (int)(sampleRate / 60.0)); // down to ~60 Hz (B1)
 
         if (maxLag <= minLag)
             return 0.0;
 
         // 1. Compute Normalized Square Difference Function (NSDF)
+        // Start from tau = 1 so we accurately track the initial zero-crossing from the main lobe at tau = 0
         std::vector<float> nsdf(maxLag + 1, 0.0f);
+        nsdf[0] = 1.0f;
 
-        for (int tau = minLag; tau <= maxLag; ++tau)
+        for (int tau = 1; tau <= maxLag; ++tau)
         {
             float r = 0.0f;
             float m = 0.0f;
@@ -46,48 +48,73 @@ public:
                 nsdf[tau] = 0.0f;
         }
 
-        // 2. Find local maxima (peaks) of NSDF after first zero crossing
-        struct Peak
+        // 2. Find MPM "Key Maxima": exactly ONE highest peak per positive-valued region after the first zero-crossing
+        struct KeyPeak
         {
             int tau;
             float value;
         };
-        std::vector<Peak> peaks;
+        std::vector<KeyPeak> keyPeaks;
         float globalMaxPeak = -1.0f;
 
-        int tauIdx = minLag;
-        while (tauIdx <= maxLag && nsdf[tauIdx] > 0.0f)
-            ++tauIdx;
-        while (tauIdx <= maxLag && nsdf[tauIdx] <= 0.0f)
-            ++tauIdx;
+        // Advance past the initial positive lobe starting at tau = 0
+        int t = 1;
+        while (t <= maxLag && nsdf[t] > 0.0f)
+            ++t;
 
-        for (int t = tauIdx; t < maxLag; ++t)
+        t = juce::jmax(t, minLag);
+
+        while (t < maxLag)
         {
-            if (nsdf[t] > nsdf[t - 1] && nsdf[t] >= nsdf[t + 1] && nsdf[t] > 0.0f)
+            // Skip negative region until a positive zero-crossing
+            while (t < maxLag && nsdf[t] <= 0.0f)
+                ++t;
+
+            if (t >= maxLag)
+                break;
+
+            // Within this positive lobe, find the single highest local peak
+            int bestTauInLobe = -1;
+            float bestValInLobe = 0.0f;
+
+            while (t < maxLag && nsdf[t] > 0.0f)
             {
-                if (nsdf[t] > globalMaxPeak)
-                    globalMaxPeak = nsdf[t];
-                peaks.push_back({ t, nsdf[t] });
+                if (t >= minLag && nsdf[t] >= nsdf[t - 1] && nsdf[t] >= nsdf[t + 1])
+                {
+                    if (nsdf[t] > bestValInLobe)
+                    {
+                        bestValInLobe = nsdf[t];
+                        bestTauInLobe = t;
+                    }
+                }
+                ++t;
+            }
+
+            if (bestTauInLobe >= minLag && bestValInLobe > 0.0f)
+            {
+                keyPeaks.push_back({ bestTauInLobe, bestValInLobe });
+                if (bestValInLobe > globalMaxPeak)
+                    globalMaxPeak = bestValInLobe;
             }
         }
 
         // Unvoiced or noise
-        if (peaks.empty() || globalMaxPeak < clarityThreshold)
+        if (keyPeaks.empty() || globalMaxPeak < clarityThreshold)
             return 0.0;
 
-        // 3. Peak selection: select the FIRST peak >= 0.85 * globalMaxPeak
-        float threshold = globalMaxPeak * 0.85f;
+        // 3. MPM Peak selection: select the FIRST Key Maximum >= k * globalMaxPeak (McLeod standard k = 0.93)
+        const float threshold = globalMaxPeak * 0.93f;
         double chosenTau = 0.0;
 
-        for (const auto& p : peaks)
+        for (const auto& p : keyPeaks)
         {
             if (p.value >= threshold)
             {
                 // 4. Sub-sample parabolic interpolation
-                int t = p.tau;
-                float y1 = nsdf[t - 1];
-                float y2 = nsdf[t];
-                float y3 = (t + 1 <= maxLag) ? nsdf[t + 1] : y2;
+                int tauIdx = p.tau;
+                float y1 = nsdf[tauIdx - 1];
+                float y2 = nsdf[tauIdx];
+                float y3 = (tauIdx + 1 <= maxLag) ? nsdf[tauIdx + 1] : y2;
 
                 float denominator = 2.0f * (2.0f * y2 - y1 - y3);
                 float delta = 0.0f;
@@ -97,7 +124,7 @@ public:
                     delta = juce::jlimit(-0.5f, 0.5f, delta);
                 }
 
-                chosenTau = (double)t + (double)delta;
+                chosenTau = (double)tauIdx + (double)delta;
                 break;
             }
         }
@@ -106,7 +133,7 @@ public:
             return 0.0;
 
         double freq = sampleRate / chosenTau;
-        if (freq < 50.0 || freq > 1500.0)
+        if (freq < 55.0 || freq > 1150.0)
             return 0.0;
 
         double midi = 69.0 + 12.0 * std::log2(freq / 440.0);

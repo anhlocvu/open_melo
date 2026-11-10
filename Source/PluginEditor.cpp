@@ -165,12 +165,14 @@ void OpenMeloAudioProcessorEditor::paint(juce::Graphics& g)
         g.drawText(araActive ? "ARA TRACK AUTO-SCAN" : "REALTIME PLAYHEAD SYNC",
                    noteBox.getX() + noteBox.getWidth() - 210, noteBox.getY() + 42, 190, 20, juce::Justification::right);
 
+        const double activeRate = juce::jmax(1.0, audioProcessor.getNoteManager().getSampleRate());
         g.setFont(juce::FontOptions(14.0f, juce::Font::plain));
         g.setColour(juce::Colour(0xffbdc3c7));
         juce::String details = "Note: " + juce::String(audioProcessor.getNoteManager().getSelectedNoteIndex() + 1) +
                                " of " + juce::String(audioProcessor.getNoteManager().getNumNotes()) +
                                "  |  Midi: " + juce::String(curNote->getNominalMidiNote()) +
-                               "  |  Duration: " + juce::String((double)curNote->lengthSamples / 44100.0, 2) + "s";
+                               "  |  Start: " + juce::String((double)curNote->startSample / activeRate, 2) + "s" +
+                               "  |  Duration: " + juce::String((double)curNote->lengthSamples / activeRate, 2) + "s";
         g.drawText(details, noteBox.getX() + 25, noteBox.getY() + 75, noteBox.getWidth() - 50, 22, juce::Justification::left);
     }
     else

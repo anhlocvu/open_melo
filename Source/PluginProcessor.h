@@ -47,6 +47,8 @@ protected:
     void didBindToARA() noexcept override;
 
 private:
+    OpenMeloDocumentController* resolveDocumentController() noexcept;
+
     NoteManager fallbackNoteManager;
     AuditionVoice auditionVoice;
     OpenMeloDocumentController* documentController = nullptr;

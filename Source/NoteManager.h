@@ -13,6 +13,7 @@ public:
     ~NoteManager();
 
     void setSampleRate(double newSampleRate);
+    double getSampleRate() const { return sampleRate; }
     void clearNotes();
 
     // Continuous real-time ingestion from DAW track aligned with exact timeline
@@ -22,7 +23,11 @@ public:
     void renderTrackPlayback(juce::AudioBuffer<float>& buffer, int64_t hostPlayheadSample, int numSamples);
 
     // Fast Offline Scan: Scan entire audio buffer or file at once (instant analysis)
-    bool scanAudioBuffer(const juce::AudioBuffer<float>& buffer, double fileSampleRate, int64_t startTimelineSample = 0);
+    bool scanAudioBuffer(const juce::AudioBuffer<float>& buffer,
+                         double fileSampleRate,
+                         int64_t startTimelineSample = 0,
+                         bool appendMode = false,
+                         bool announceSpeech = true);
     bool scanAudioFile(const juce::File& file, int64_t startTimelineSample = 0);
 
     // Check if an existing note covers the given timeline position
@@ -44,6 +49,7 @@ public:
     void transposeCurrentNote(int deltaSemitones);
     void tuneCentsCurrentNote(int deltaCents);
     void snapCurrentNoteToZero();
+    void restoreNoteTuning(int index, int semitones, int cents);
 
     // Note Slicing / Splitting
     bool splitCurrentNote();
@@ -63,6 +69,7 @@ public:
     std::function<void()> onNotesChanged;
 
 private:
+    mutable juce::SpinLock notesLock;
     double sampleRate = 44100.0;
     int selectedNoteIndex = 0;
     std::vector<OpenMeloNote> notes;

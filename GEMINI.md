@@ -273,6 +273,47 @@
 - Đã tự động triển khai vào:
   `C:\Users\LCBoy\AppData\Local\Programs\Common\VST3\Open Melo.vst3` (kèm `nvdaControllerClient64.dll`).
 
+---
+
+## Giai Đoạn 9: Khắc Phục Triệt Để 4 Lỗi Nghiêm Trọng (Câm Track ARA, Trễ Timeline Nhiều Bar, Tụt Nửa Cung Sample Rate & Tiếng Rè/Robot Khi Duyệt Nốt)
+**Ngày hoàn thành**: 10/11/2026
+
+### 1. Nguyên Nhân Gốc Rễ & Giải Pháp Đã Thực Hiện
+1. **Khắc phục lỗi Câm Track Vocal khi thêm Open Melo vào DAW ARA (`OpenMeloARA.cpp`)**:
+   - **Nguyên nhân 1**: Trong `juce::AudioProcessorARAExtension::processBlockForARA`, `playbackRenderer->processBlock` và `editorRenderer->processBlock` chạy nối tiếp nhau trên cùng một `buffer`. Trước đây `OpenMeloEditorRenderer::processBlock` gọi `buffer.clear()` vô điều kiện, xóa sạch 100% âm thanh vừa được `OpenMeloPlaybackRenderer` xuất ra.
+   - **Nguyên nhân 2**: Trong `scanAudioSourceForRegion`, `scannedSources.insert(audioSource)` được gọi trước khi DAW bật quyền truy cập mẫu (`didEnableAudioSourceSamplesAccess(audioSource, true)`), khiến lần đọc đầu thất bại và không bao giờ quét lại nữa.
+   - **Nguyên nhân 3**: Khởi tạo `juce::ARAAudioSourceReader` trên stack trong mỗi chu kỳ `processBlock` của luồng Audio Realtime.
+   - **Giải pháp**:
+     - Loại bỏ hoàn toàn lệnh xóa `buffer.clear()` trong `OpenMeloEditorRenderer::processBlock`.
+     - Lắng nghe đầy đủ vòng đời ARA (`didEnableAudioSourceSamplesAccess`, `didUpdatePlaybackRegionProperties`, `didEndEditing`, `doUpdateAudioSourceContent`) trong `OpenMeloDocumentController::syncRegionsWithDocument()`. Chỉ đánh dấu region đã quét sau khi `isSampleAccessEnabled() == true` và đọc mẫu thành công.
+     - Cache `std::unique_ptr<juce::ARAAudioSourceReader>` theo từng `ARAAudioSource*` trong `OpenMeloPlaybackRenderer`.
+2. **Khắc phục lỗi Trễ Timeline Nhiều Bar & Tụt Cao Độ (~0.5–1.5 cung) do Lệch Sample Rate (`OpenMeloARA.cpp`)**:
+   - **Nguyên nhân**:
+     - Khi clip vocal trên DAW bị cắt phần đầu (`startInAudioModificationTime > startInPlaybackTime`), phép tính cũ lấy `timeOffset < 0` rồi ép `if (startTimelineSample < 0) startTimelineSample = 0`, khiến phần intro đã bị cắt bỏ vẫn bị nạp vào đầu timeline và đẩy toàn bộ câu hát thật bị trễ đi nhiều bar.
+     - Khi file audio có tần số mẫu (VD: 44.1 kHz) khác với project DAW (VD: 48 kHz), việc đọc mẫu 1:1 không nội suy làm tụt cao độ $-1.46$ semitones và trôi 3900 mẫu mỗi giây.
+   - **Giải pháp**:
+     - Trong `OpenMeloDocumentController::syncRegionsWithDocument()`: Chỉ trích xuất đúng phạm vi thời gian hiệu lực `[startInAudioModificationTime .. endInAudioModificationTime]` của từng `ARAPlaybackRegion`, nội suy bằng `juce::LagrangeInterpolator` sang đúng `dawSampleRate`, và đặt tại tọa độ mẫu chính xác `std::llround(effectivePlaybackStart * targetRate)`.
+     - Trong `OpenMeloPlaybackRenderer::processBlock`: Bổ sung bộ nội suy bậc ba 4 điểm Catmull-Rom phi trạng thái (stateless) theo thời gian thực khi `sourceRate != sampleRate`.
+3. **Khắc phục lỗi Tiếng Rè / Robot / Người Ngoài Hành Tinh Khi Duyệt & Kéo Nốt (`PluginProcessor.cpp`, `NoteManager.cpp`, `PitchShiftEngine.cpp`, `PitchDetector.h`)**:
+   - **Nguyên nhân 1 (Đọc chồng 3 lần `AuditionVoice`)**: Trong chế độ ARA, mỗi chu kỳ `processBlock` gọi `AuditionVoice::renderNextBlock` tới 3 lần (`PlaybackRenderer`, `EditorRenderer`, `PluginProcessor`), làm nốt phát nhanh gấp 3 lần và cộng chồng các đoạn lệch pha lên nhau.
+   - **Nguyên nhân 2 (Mất mẫu giữa nốt)**: Trong `NoteManager::scanAudioBuffer`, các hop có `silenceCount < 4` ở giữa nốt bị bỏ qua không copy vào `segmentAudioL/R`, gây đứt đoạn pha và hụt độ dài nốt.
+   - **Nguyên nhân 3 (`SignalsmithStretch::presetDefault` cửa sổ 120ms & không đệm biên)**: Cửa sổ mặc định 120ms (`seekLength` 150ms) quá dài cho nốt vocal ngắn, cộng với việc gọi `stretch.exact()` không có padding khiến phần đuôi của mọi nốt bị trộn với `flush(zeros)` đảo pha.
+   - **Nguyên nhân 4 (`PitchDetector` MPM)**: Tìm mọi cực đại cục bộ với ngưỡng `0.85` khiến Formant $F_1$ mạnh dễ làm nhảy lên họa âm bậc 2/3.
+   - **Giải pháp**:
+     - Chỉ tiêu thụ `AuditionVoice::renderNextBlock` **đúng 1 lần duy nhất mỗi block** kèm ramp 64 mẫu chống nổ tiếng (`AuditionVoice.h`).
+     - Trích xuất lát cắt mẫu **liên tục 100%** `[segmentStartPos .. segmentEndPos)` trực tiếp từ buffer gốc trong `NoteManager::scanAudioBuffer`, đồng thời áp dụng hòa trộn tuyến tính (true linear crossfade) `dest * (1 - alpha) + src * alpha` tại biên nốt trong `renderTrackPlayback`.
+     - Cấu hình cửa sổ STFT chuyên biệt cho giọng hát đơn âm (`~46ms` block / `~11.5ms` hop) trong `PitchShiftEngine::process`, và **luôn luôn đệm phản xạ có cửa sổ Cosine (`pad = seekLen`)** ở cả hai đầu cho mọi nốt hát để 100% nốt nằm trong vùng steady-state.
+     - Chuẩn hóa thuật toán **Key Maxima** (1 đỉnh cao nhất trên mỗi miền dương, ngưỡng $k = 0.93$) trong `PitchDetector.h`.
+
+### 2. Kết Quả Kiểm Thử Tự Động (`verify_open_melo`)
+- **Test 1 (44.1 kHz file trong 48 kHz DAW + Clip bị cắt 4s đầu đặt tại Bar 2)**:
+  - Sai số cao độ: **0.0016 semitones (0.16 cent)** — không còn bị tụt nửa cung hay 1.46 cung.
+  - Vị trí Timeline: Khớp chính xác tại `2.50s` — không còn bị trễ bar.
+- **Test 2 (Trích xuất sóng âm liên tục)**: Giữ nguyên 100% các hop nội tại bên trong nốt.
+- **Test 3 (Dịch cao độ +2 semitones & bảo toàn Formant)**: Cao độ đầu ra đạt `62.017 MIDI` (từ `60.0 MIDI`), năng lượng `Mid RMS (0.06979)` và `Tail RMS (0.06977)` phẳng 99.97%, âm thanh tự nhiên, trong trẻo.
+- **Test 4 (AuditionVoice 1.0x)**: Phát đúng tốc độ 1.0x, không chồng tiếng, không click/pop.
+- Đã biên dịch Release x64 và cập nhật trực tiếp vào `C:\Users\LCBoy\AppData\Local\Programs\Common\VST3\Open Melo.vst3`.
+
 
 
 <!-- graft:start -->

@@ -37,6 +37,14 @@ public:
             playbackBuffer.copyFrom(ch, 0, bufferToPlay, ch, 0, numSamples);
         }
 
+        // Apply short 64-sample anti-click fade-in and fade-out ramps
+        const int fadeLen = juce::jmin(64, numSamples / 4);
+        if (fadeLen > 1)
+        {
+            playbackBuffer.applyGainRamp(0, fadeLen, 0.0f, 1.0f);
+            playbackBuffer.applyGainRamp(numSamples - fadeLen, fadeLen, 1.0f, 0.0f);
+        }
+
         playheadPosition.store(0);
         isPlaying.store(true);
     }
